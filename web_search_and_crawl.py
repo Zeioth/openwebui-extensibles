@@ -188,6 +188,13 @@ class Tools:
             default=200,
             description="Image thumbnail size (in px) square.  eg, setting 200 will mean thumbnails are 200x200px in size. Ignored if 'Display images as thumbnails' is off.",
         )
+        CRAWL4AI_MIN_IMAGE_SCORE: int = Field(
+            title="Min Image Score To Include",
+            default=6,
+            ge=0,
+            le=10,
+            description="Minimum image score from Crawl4AI to consider including in the response. Min 0, Max 10.",
+        )
         CRAWL4AI_VALIDATE_IMAGES: bool = Field(
             title="Validate Image Links",
             default=True,
@@ -1979,7 +1986,8 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
                 image_list = []
                 found_images = list(
                     filter(
-                        lambda x: x.get("score", 0) >= 5,
+                        lambda x: x.get("score", 0)
+                        >= self.valves.CRAWL4AI_MIN_IMAGE_SCORE,
                         item.get("media", {}).get("images", []),
                     )
                 )
