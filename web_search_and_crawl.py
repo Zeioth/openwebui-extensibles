@@ -18,7 +18,7 @@ import tiktoken
 import aiohttp
 import asyncio
 from urllib.parse import parse_qs, urlparse, quote
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Any, List, Optional, Union, Callable, Literal
 from loguru import logger
 from crawl4ai import (
@@ -293,6 +293,24 @@ class Tools:
             description="Enable detailed debug logging",
         )
 
+        @model_validator(mode="after")
+        def validate_settings(self):
+            """Validate the conditional settings."""
+            # At least one search source must be enabled
+            if not self.USE_NATIVE_SEARCH and not self.SEARCH_WITH_SEARXNG:
+                raise ValueError(
+                    "Either 'Use Native Search' or 'Search with SearXNG' must be enabled"
+                )
+            # If SearXNG is enabled, its URL must not be empty
+            if self.SEARCH_WITH_SEARXNG and (
+                not self.SEARXNG_BASE_URL or not self.SEARXNG_BASE_URL.strip()
+            ):
+                raise ValueError(
+                    "'SearXNG Search URL' is required when 'Search with SearXNG' is enabled. "
+                    "Please provide the URL for your SearXNG instance."
+                )
+            return self
+
     class UserValves(BaseModel):
         """Per-user configurable options for Research Mode and crawling strategies."""
 
@@ -443,9 +461,11 @@ class Tools:
 
         # Ensure protocol
         if not url.startswith(("http://", "https://")):
+            logger.warning(
+                f"URL '{url}' missing protocol. Adding '{default_protocol}'. "
+                "Consider updating your configuration to include http:// or https:// prefix."
+            )
             url = f"{default_protocol}{url}"
-            if self.valves.DEBUG:
-                logger.debug(f"Added protocol to URL: {url}")
 
         # Remove trailing slash
         url = url.rstrip("/")
@@ -498,14 +518,15 @@ class Tools:
         if in_docker and self.valves.DEBUG:
             logger.info("Running in Docker environment")
 
-        # Normalize service URLs
+        # Normalize service URLs (this may add warnings if protocol missing)
         self.valves.CRAWL4AI_BASE_URL = self._normalize_url(
             self.valves.CRAWL4AI_BASE_URL
         )
         self.valves.SEARXNG_BASE_URL = self._normalize_url(self.valves.SEARXNG_BASE_URL)
         self.valves.LLM_BASE_URL = self._normalize_url(self.valves.LLM_BASE_URL)
 
-        # Auto-configure for Ollama if base URL is default OpenRouter
+        # Auto-configure for Ollama if base URL is default OpenRouter (only if unchanged by user)
+        original_base_url = self.valves.LLM_BASE_URL
         if (
             self.valves.LLM_BASE_URL == "http://openrouter.ai/api/v1"
             or self.valves.LLM_BASE_URL == "https://openrouter.ai/api/v1"
@@ -528,6 +549,12 @@ class Tools:
                     logger.info(
                         "Could not auto-detect Ollama, keeping original LLM_BASE_URL"
                     )
+
+        if self.valves.LLM_BASE_URL != original_base_url:
+            logger.warning(
+                f"LLM_BASE_URL was automatically changed from '{original_base_url}' to '{self.valves.LLM_BASE_URL}'. "
+                "If this is not desired, set a custom URL in the valve configuration."
+            )
 
         # Validate LLM provider
         self._validate_llm_provider()
@@ -1398,10 +1425,10 @@ class Tools:
             temperature=0.3,
             max_tokens=500,
         )
+        # Only assign api_token if it's provided (avoid setting None)
         if self.valves.LLM_API_TOKEN:
             llm_config.api_token = self.valves.LLM_API_TOKEN
-        else:
-            llm_config.api_token = None
+
         # Process starting URLs
         urls_to_process = list(start_urls[:5])
 
@@ -1694,20 +1721,20 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
             )
 
             if source_result.get("content"):
-                # Normalize content
-                normalized_content = self._normalize_content(source_result["content"])
                 # Score content relevance
-                content_text = str(normalized_content)
+                content_text = str(source_result["content"])
                 relevance_score = sum(
                     1 for kw in keywords if kw in content_text.lower()
                 )
 
                 results["sources"][source_url] = {
-                    "content": normalized_content,
+                    "content": source_result["content"],
                     "relevance_score": relevance_score,
                     "links": source_result.get("links", [])[:10],
                 }
 
+                # Normalize content before adding
+                normalized_content = self._normalize_content(source_result["content"])
                 results["content"].extend(normalized_content)
                 results["total_pages"] += 1
 
@@ -1768,16 +1795,14 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
                 )
 
                 if link_result.get("content"):
-                    # Normalize content
-                    normalized_link_content = self._normalize_content(
-                        link_result["content"]
-                    )
-                    content_text = str(normalized_link_content)
+                    content_text = str(link_result["content"])
                     relevance_score = sum(
                         1 for kw in keywords if kw in content_text.lower()
                     )
 
-                    results["content"].extend(normalized_link_content)
+                    # Normalize content before adding
+                    normalized_content = self._normalize_content(link_result["content"])
+                    results["content"].extend(normalized_content)
                     results["total_pages"] += 1
                     crawled += 1
 
@@ -1786,9 +1811,6 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
 
                 if link_result.get("videos"):
                     results["videos"].extend(link_result["videos"])
-
-        # Normalize all content one more time at the end
-        results["content"] = self._normalize_content(results["content"])
 
         # Sort all content by relevance
         results["content"].sort(
@@ -1821,25 +1843,15 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
         if isinstance(urls, str):
             urls = [urls]
 
-        # Normalize URLs to crawl
-        normalized_urls = []
         for idx, url in enumerate(urls):
             # Ensure URL starts with http
-            if not url.startswith(("http://", "https://")):
-                url = f"https://{url}"
-                if self.valves.DEBUG:
-                    logger.debug(f"Added https:// to URL: {url}")
-            normalized_urls.append(url)
-        urls = normalized_urls
+            if not url.startswith("http"):
+                urls[idx] = f"https://{url}"
 
-        # Ensure CRAWL4AI_BASE_URL has protocol
-        base_url = self._normalize_url(self.valves.CRAWL4AI_BASE_URL, "http://")
-        endpoint = f"{base_url}/crawl"
+        endpoint = f"{self.valves.CRAWL4AI_BASE_URL}/crawl"
 
         if self.valves.DEBUG:
             logger.info(f"Using LLM provider: {self.valves.LLM_PROVIDER}")
-            logger.info(f"Crawl4AI endpoint: {endpoint}")
-            logger.info(f"URLs to crawl: {urls}")
 
         # Building configs
         browser_config = BrowserConfig(
@@ -1854,7 +1866,6 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
             ],
         )
 
-        # Enhanced LLM configuration
         llm_config = LLMConfig(
             provider=self.valves.LLM_PROVIDER,
             base_url=self.valves.LLM_BASE_URL,
@@ -1864,30 +1875,8 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
             frequency_penalty=self.valves.LLM_FREQUENCY_PENALTY or None,
             presence_penalty=self.valves.LLM_PRESENCE_PENALTY or None,
         )
-
-        # Handle API token
-        if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip():
+        if self.valves.LLM_API_TOKEN:
             llm_config.api_token = self.valves.LLM_API_TOKEN
-        else:
-            llm_config.api_token = None
-
-        # LOGS: Check Ollama LLM_PROVIDER format
-        if "ollama" in self.valves.LLM_PROVIDER.lower():
-            if self.valves.LLM_BASE_URL.startswith("https://"):
-                logger.warning(
-                    f"Ollama typically uses HTTP, not HTTPS. Your URL is set to {self.valves.LLM_BASE_URL}. "
-                    f"If you're running Ollama locally, consider using http:// instead."
-                    f"You can use HTTPS if you want instead, but if you don't have a secure certificate you will get error."
-                )
-            elif not self.valves.LLM_BASE_URL.startswith("http://"):
-                logger.warning(
-                    f"Ollama base URL should start with http://. Current URL: {self.valves.LLM_BASE_URL}"
-                    f"NOTE: You can use HTTPS if you want instead, but if you don't have a secure certificate you will get error."
-                )
-
-        # Asegurar que no hay trailing slash
-        if llm_config.base_url.endswith("/"):
-            llm_config.base_url = llm_config.base_url[:-1]
 
         extraction_strategy = LLMExtractionStrategy(
             llm_config=llm_config,
@@ -1953,312 +1942,81 @@ Return only the link numbers (e.g., "1, 3, 5"), nothing else."""
 
         payload = {
             "urls": urls,
-            "browser_config": browser_config.dump(),
-            "crawler_config": crawler_config.dump(),
+            "extraction_strategy": extraction_strategy.model_dump(mode="json"),
+            "crawler_config": crawler_config.model_dump(mode="json"),
+            "browser_config": browser_config.model_dump(mode="json"),
         }
 
+        # Add optional extract_links parameter
+        if extract_links:
+            payload["extract_links"] = True
+
+        # Make request to Crawl4AI
         try:
-            # Using a timeout to prevent the UI from hanging
-            timeout = self.valves.CRAWL4AI_TIMEOUT * len(urls) + 60
-            response = requests.post(
-                endpoint, json=payload, headers=headers, timeout=timeout
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            # Crawl4AI returns content in the 'results' key as a list
-            results = []
-            seen_images = set()
-            seen_videos = set()
-            all_images = []
-            all_videos = []
-            all_links = []  # For research mode link extraction
-
-            data_list = data.get("results", [])
-            for item in data_list:
-                if item.get("success") is not True:
-                    continue
-
-                url = item.get("url", "")
-                parsed_url = urlparse(url)
-
-                # Extract media
-                image_list = []
-                found_images = list(
-                    filter(
-                        lambda x: x.get("score", 0)
-                        >= self.valves.CRAWL4AI_MIN_IMAGE_SCORE,
-                        item.get("media", {}).get("images", []),
-                    )
-                )
-                for img in found_images:
-                    src = img.get("src")
-                    if src:
-                        # Fix protocol-relative URLs
-                        if src.startswith("//"):
-                            src = f"https:{src}"
-                        elif not src.startswith("http"):
-                            # Handle relative URLs
-                            src = f"{parsed_url.scheme}://{parsed_url.netloc}/{src.lstrip('/')}"
-                        parsed_image = urlparse(src)
-                        if (
-                            f"{parsed_image.scheme}://{parsed_image.netloc}/{parsed_image.path}"
-                            not in seen_images
-                        ):
-                            seen_images.add(
-                                f"{parsed_image.scheme}://{parsed_image.netloc}/{parsed_image.path}"
-                            )
-                            image_list.append(src)
-
-                video_list = []
-                found_videos = list(
-                    filter(
-                        lambda x: x.get("score", 0) >= 5,
-                        item.get("media", {}).get("videos", []),
-                    )
-                )
-                for vid in found_videos:
-                    src = vid.get("src")
-                    if src:
-                        # Fix protocol-relative URLs
-                        if src.startswith("//"):
-                            src = f"https:{src}"
-                        elif not src.startswith("http"):
-                            # Handle relative URLs
-                            src = f"{parsed_url.scheme}://{parsed_url.netloc}/{src.lstrip('/')}"
-                        parsed_video = urlparse(src)
-                        if (
-                            f"{parsed_video.scheme}://{parsed_video.netloc}/{parsed_video.path}"
-                            not in seen_images
-                        ):
-                            seen_videos.add(
-                                f"{parsed_video.scheme}://{parsed_video.netloc}/{parsed_video.path}"
-                            )
-                            video_list.append(src)
-
-                # Extract links for research mode
-                if extract_links:
-                    links = []
-                    html_content = item.get("html", "")
-                    # Simple link extraction from HTML
-                    import re
-
-                    link_pattern = r'href=["\'](.*?)["\']'
-                    for match in re.findall(link_pattern, html_content):
-                        if (
-                            match
-                            and not match.startswith("#")
-                            and not match.startswith("javascript:")
-                        ):
-                            # Convert relative URLs to absolute
-                            if not match.startswith("http"):
-                                if match.startswith("/"):
-                                    match = f"{parsed_url.scheme}://{parsed_url.netloc}{match}"
-                                else:
-                                    match = f"{parsed_url.scheme}://{parsed_url.netloc}/{match}"
-                            if match.startswith("http"):
-                                links.append(match)
-                    all_links.extend(links)
-
-                await __event_emitter__(
-                    {
-                        "type": "files",
-                        "data": {"files": image_list + video_list},
-                    }
-                )
-
-                # Extract content - this is the critical part
-                try:
-                    extracted_content = item.get("extracted_content", "[]")
-                    if isinstance(extracted_content, str):
-                        tmp_content = orjson.loads(extracted_content)
-                    else:
-                        tmp_content = extracted_content
-
-                    # Ensure tmp_content is a list
-                    if not isinstance(tmp_content, list):
-                        if self.valves.DEBUG:
-                            logger.warning(
-                                f"extracted_content is not a list: {type(tmp_content)}"
-                            )
-                        tmp_content = []
-
-                    content_list = []
-                    for content_item in tmp_content:
-                        if (
-                            isinstance(content_item, dict)
-                            and content_item.get("error") is not False
-                        ):
-                            # Ensure we have topic and summary
-                            topic = content_item.get("topic", "Information")
-                            summary = content_item.get("summary", str(content_item))
-                            content_list.append({"topic": topic, "summary": summary})
-                        elif isinstance(content_item, dict):
-                            # Has error or missing fields
-                            pass
-                        elif isinstance(content_item, str):
-                            # String content
-                            content_list.append(
-                                {"topic": "Content", "summary": content_item}
-                            )
-                        elif isinstance(content_item, list):
-                            # Nested list - flatten
-                            for sub_item in content_item:
-                                if isinstance(sub_item, dict):
-                                    content_list.append(
-                                        {
-                                            "topic": sub_item.get(
-                                                "topic", "Information"
-                                            ),
-                                            "summary": sub_item.get(
-                                                "summary", str(sub_item)
-                                            ),
-                                        }
-                                    )
-                                else:
-                                    content_list.append(
-                                        {"topic": "Content", "summary": str(sub_item)}
-                                    )
-                except Exception as e:
-                    logger.error(f"Error parsing extracted_content: {e}")
-                    content_list = []
-
-                # Build result with URL included
-                results.append(
-                    {
-                        "url": url,
-                        "title": item.get("metadata", {}).get("title", ""),
-                        "content": content_list,
-                        "images": image_list,
-                        "videos": video_list,
-                    }
-                )
-                all_images.extend(image_list)
-                all_videos.extend(video_list)
-
-                # Emit citation for this URL
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "citation",
-                            "data": {
-                                "document": [f"Content from {url}"],
-                                "metadata": [{"source": url}],
-                                "source": {
-                                    "name": item.get("metadata", {}).get("title", url)
-                                },
-                            },
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=self.valves.CRAWL4AI_TIMEOUT),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        logger.error(
+                            f"Crawl4AI error: {response.status} - {error_text}"
+                        )
+                        return {
+                            "content": [],
+                            "images": [],
+                            "videos": [],
+                            "links": [] if extract_links else None,
                         }
-                    )
 
-            self.content_counter += len(results)
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"Analyzed {self.content_counter} page{'s' if self.content_counter > 1 else ''} from {self.total_urls} URL{'s' if self.crawl_counter > 1 else ''}...",
-                            "done": False,
-                        },
+                    result = await response.json()
+
+                    # Parse the response
+                    content = result.get("extracted_content", [])
+                    images = result.get("images", [])
+                    videos = result.get("videos", [])
+                    links = result.get("links", []) if extract_links else None
+
+                    # Filter images by score if min score is set
+                    if self.valves.CRAWL4AI_MIN_IMAGE_SCORE > 0 and images:
+                        filtered_images = []
+                        for img in images:
+                            if (
+                                isinstance(img, dict)
+                                and img.get("score", 0)
+                                >= self.valves.CRAWL4AI_MIN_IMAGE_SCORE
+                            ):
+                                filtered_images.append(img.get("src", ""))
+                            elif isinstance(img, str):
+                                # If no score info, include anyway
+                                filtered_images.append(img)
+                        images = filtered_images
+
+                    return {
+                        "content": content,
+                        "images": images,
+                        "videos": videos,
+                        "links": links,
                     }
-                )
 
-            if self.valves.DEBUG:
-                logger.info(f"Successfully crawled {len(results)} URLs")
-
-            # Normalize the content before returning
-            normalized_results = []
-            for result in results:
-                normalized_result = result.copy()
-                if "content" in normalized_result:
-                    normalized_result["content"] = self._normalize_content(
-                        normalized_result["content"]
-                    )
-                normalized_results.append(normalized_result)
-
-            response = {
-                "content": normalized_results,
-                "images": all_images or [],
-                "videos": all_videos or [],
-                "links": all_links if extract_links else [],
-            }
-            return response
-
-        except requests.exceptions.ConnectionError as e:
-            error_msg = (
-                f"Cannot connect to Crawl4AI at {endpoint}. Please verify:\n"
-                f"- Crawl4AI container is running\n"
-                f"- URL is correct: {self.valves.CRAWL4AI_BASE_URL}\n"
-                f"- Network connectivity between containers\n"
-                f"- If using host.docker.internal, ensure --add-host is set\n"
-                f"Original error: {str(e)}"
-            )
-            logger.error(error_msg)
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "error",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout while crawling URLs: {urls}")
             return {
-                "error": error_msg,
-                "details": str(e),
                 "content": [],
                 "images": [],
                 "videos": [],
-            }
-        except requests.exceptions.Timeout as e:
-            timeout_seconds = self.valves.CRAWL4AI_TIMEOUT * len(urls) + 60
-            error_msg = f"Timeout connecting to Crawl4AI at {endpoint} after {timeout_seconds}s. Check if Crawl4AI is processing too many URLs."
-            logger.error(error_msg)
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "error",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
-            return {
-                "error": error_msg,
-                "details": str(e),
-                "content": [],
-                "images": [],
-                "videos": [],
-            }
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Network error connecting to Crawl4AI: {str(e)}. Check if the URL {self.valves.CRAWL4AI_BASE_URL} is accessible."
-            logger.error(error_msg)
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "error",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
-            return {
-                "error": error_msg,
-                "details": str(e),
-                "content": [],
-                "images": [],
-                "videos": [],
+                "links": [] if extract_links else None,
             }
         except Exception as e:
-            error_msg = (
-                f"An unexpected error occurred: {str(e)}\n{traceback.format_exc()}"
+            logger.error(
+                f"Unexpected error while crawling: {str(e)}\n{traceback.format_exc()}"
             )
-            logger.error(error_msg)
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "error",
-                        "data": {"description": error_msg, "done": True},
-                    }
-                )
             return {
-                "error": error_msg,
-                "details": str(e),
                 "content": [],
                 "images": [],
                 "videos": [],
+                "links": [] if extract_links else None,
             }
