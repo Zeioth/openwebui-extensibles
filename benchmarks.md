@@ -21,7 +21,7 @@ Given the prompt
 | 538,9s               |        317.3s    |    171.347s     |  103.263s    |    251.1s |
 
 We've noted 'research disabled' is sending batches instead of working in parallel like research mode. Because of this, it can overflow the system resources easily and cause timeouts and error 500 on crawl4ai. A temporal solution is either limit tokens to a small amount, or reduce batch size.
-Also, if we keep bathces, we should apply them to all modes. But I don't find a great reason for using this approach atm...
+Also, if we keep batches, we should apply them to all modes. But I don't find a great reason for using this approach atm...
 
 1. Maybe using batches so produce bigger context would take less tokens to find relevant context.
 
