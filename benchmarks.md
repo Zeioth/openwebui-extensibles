@@ -2,7 +2,7 @@ Just for fun; don't take it super serious.
 
 ## Benchmarks v3.8.4
 
-### Test 1 - 600 tokens for crawl4AI and 2400 output tokens. Model `NuExtract-2-2B-GGUF:Q3_K_M`
+### Test 1 - `600 tokens` for crawl4AI and `2400 output tokens`. Model `NuExtract-2-2B-GGUF:Q3_K_M`
 Given the prompt
 > Search 'tipos de fresa' with research mode using the <x> strategy.
 
