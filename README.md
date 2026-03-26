@@ -14,6 +14,7 @@ This tool enables your Open WebUI instance to not only search the internet but t
 - [✨ Key Features](#-key-features)
 - [🚀 How It Works](#-how-it-works)
 - [🤔 Examples](#-examples)
+- [Configuration example](#configuration-example)
 - [⚙️ Configuration Valves](#️-configuration-valves)
   - [Global Settings (Valves)](#global-settings-valves)
   - [Per‑User Settings (UserValves)](#peruser-settings-uservalves)
@@ -70,7 +71,7 @@ The Crawl4AI LLM (you can specify in the valves) is smart enough to decide the b
 | `Search '<your_search>'` with research mode using the research_filter strategy | URL filtering |
 
 
-## Configuration example:
+## Configuration example
 In the function valves (assuming you use docker). 
 
 | Valve | Value | Comments |
