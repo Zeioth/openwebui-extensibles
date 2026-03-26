@@ -7,6 +7,24 @@ This tool enables your Open WebUI instance to not only search the internet but t
 
 ---
 
+## 📑 Table of Contents
+
+- [✨ Key Features](#-key-features)
+- [🚀 How It Works](#-how-it-works)
+- [More Info](#more-info)
+- [⚙️ Configuration Valves](#️-configuration-valves)
+  - [Global Settings (Valves)](#global-settings-valves)
+  - [Per‑User Settings (UserValves)](#peruser-settings-uservalves)
+- [🛠️ Requirements](#️-requirements)
+- [📖 Usage Examples](#-usage-examples)
+- [🧩 Code Structure and Execution Flow](#-code-structure-and-execution-flow)
+  - [Execution Flow](#execution-flow)
+- [📝 Notes on Research Mode Activation](#-notes-on-research-mode-activation)
+- [🐞 How to debug](#-how-to-debug)
+- [⭐ Fork repo](#-fork-repo)
+
+---
+
 ## ✨ Key Features
 
 - **Dual‑Engine Search:** Simultaneously uses SearXNG and Open WebUI Native Search to find the most relevant URLs.
@@ -187,9 +205,9 @@ These settings are not currently exposed to the user trough valves. The LLM will
 
 ## 🐞 How to debug
 If you find an issue configuring or using this function; Enable the debug valve and run this to see the logs
-```
-sudo docker logs -f open-webui
-```
+
+> sudo docker logs -f open-webui
+
 
 Assuming you use docker.
 
