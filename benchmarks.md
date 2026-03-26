@@ -30,3 +30,7 @@ Also, if we keep batches, we should apply them to all modes. But I don't find a 
 3. A third possiblity would be double down on step 1, and spend most tokens there to generate massive context (relevant, and irrelevant), and then a quick second step to produce a small, but very relevant response. There's risk to leave important info out this way though.
 
 At the moment we are keeping thing simple and using simple model for scraping, and our real powerful model on the chat to process everything. So a second step might not even be necessary. But we should measure all these ideas. At least, mathematically, prior to manual testing, as each test take 2 minutes minimum.
+
+I'm gonna save you the math, but two‑pass filtering is ~20% superior for the same token budget when r < 1. It allows concentrating tokens on the subset of pages that matter, yielding higher extraction quality per relevant page. It also uses fewer total tokens (if we keep the same budget, we can allocate even more tokens to the second pass, improving quality further).
+
+But very likely there's other stuff we could optimize before recurring to that. Which an average of 200s per query, we need at least a x4 improvement to achieve an OK user experience.
