@@ -1,8 +1,8 @@
 """
 title: Web Search and Crawl
 description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, and Crawl4AI. Extracts content from URLs using a self-hosted Crawl4AI instance, optionally researching using Crawl4AI Deep Research.
-author: lexiismadd
-author_url: https://github.com/lexiismadd
+author: lexiismadd, zeioth
+author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
 version: 2.8.4
 license: MIT
