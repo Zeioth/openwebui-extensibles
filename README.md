@@ -221,4 +221,4 @@ Assuming you use docker.
 
 ## ⭐ Fork repo
 
-Please log any issues [on the GitHub repository]([https://github.com/lexiismadd/openwebui-extensibles/issues](https://github.com/Zeioth/openwebui-extensibles)).
+Please log any issues [on the GitHub repository](https://github.com/Zeioth/openwebui-extensibles).
