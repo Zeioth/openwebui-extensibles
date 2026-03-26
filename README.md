@@ -81,8 +81,8 @@ In the function valves (assuming you use docker).
 | LLM Base URL |  http://host.docker.internal:11434 | Assuming local ollama dockerized |
 | LLM Provider and model  | ollama/hf.co/aman2024/NuExtract-2-2B-GGUF:Q3_K_M | Assuming ollama. The format is `backend/model`, so, ollama. |
 | LLM Temperature | 0 | Recommended value for NuExtract or Schematron models. |
-| Max Tokens used by Crawl4AI  | 1200 | Recommended to specify it so Crawl4AI doesn't take forever. |
-| LLM Max Tokens  | 1200 | Recommended to specify it so Crawl4AI doesn't take forever. |
+| Max Tokens used by Crawl4AI  | 1200 | Recommended to specify it so Crawl4AI doesn't take forever. This controls the reasoning during crawl4AI. |
+| LLM Max Tokens  | 1200 | Recommended to specify it so Crawl4AI doesn't take forever. This controls the answer lenght. |
 | Debug | true | Recommended unless you are going for production (which you should't). |
 
 ## ⚙️ Configuration Valves
