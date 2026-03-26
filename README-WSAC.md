@@ -1,6 +1,6 @@
 # 🌐 Web Search and Crawl for Open WebUI
 
-**Version:** 2.8.3  
+**Version:** 2.8.4
 **Author:** lexiismadd (with contributions from Zeioth)
 
 This tool enables your Open WebUI instance to not only search the internet but to **deeply crawl, extract, and summarise** content from web pages. It combines the power of search engines (**SearXNG** and **Open WebUI Native Search**) with the advanced extraction capabilities of **Crawl4AI**.
