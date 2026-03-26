@@ -284,7 +284,7 @@ class Tools:
         )
         DEBUG: bool = Field(
             title="Debug logging",
-            default=False,
+            default=True,
             description="Enable detailed debug logging",
         )
 
