@@ -29,4 +29,4 @@ Also, if we keep bathces, we should apply them to all modes. But I don't find a 
 
 3. A third possiblity would be double down on step 1, and spend most tokens there to generate massive context (relevant, and irrelevant), and then a quick second step to produce a small, but very relevant response. There's risk to leave important info out this way though.
 
-Atm the moment we are keeping thing simple and using simple model for scraping, and our real powerful model on the chat to process everything. So a second step might not even be necessary. But we should measure all these ideas. At least, matematically, prior to manual testing, as each test take 2 minutes minimum.
+At the moment we are keeping thing simple and using simple model for scraping, and our real powerful model on the chat to process everything. So a second step might not even be necessary. But we should measure all these ideas. At least, mathematically, prior to manual testing, as each test take 2 minutes minimum.
