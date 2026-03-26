@@ -18,4 +18,4 @@ Given the prompt
 
 | research disabled | pseudo_adaptive | llm_guided | BFS-Deep| Research FILTER|
 |-------------------|-----------------|------------|---------|-----------|
-| 744.3 s              |        317.3 s    |         |      |    251.1 s |
+| 744.3 s              |        317.3 s    |    171.347 s     |  103.263 s    |    251.1 s |
