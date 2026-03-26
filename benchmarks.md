@@ -16,4 +16,6 @@ All research modes have timed out due to excesive tokens usage. Let's repeat the
 Given the prompt
 > Search 'tipos de fresa' with research mode using the <x> strategy.
 
-....
+| research disabled | pseudo_adaptive | llm_guided | BFS-Deep| Research FILTER|
+|-------------------|-----------------|------------|---------|-----------|
+| 744.3 s              |        317.3 s    |         |      |    251.1 s |
