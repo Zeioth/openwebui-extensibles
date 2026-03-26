@@ -70,6 +70,20 @@ The Crawl4AI LLM (you can specify in the valves) is smart enough to decide the b
 | `Search '<your_search>'` with research mode using the research_filter strategy | URL filtering |
 
 
+## Configuration example:
+In the function valves (assuming you use docker). 
+
+| Valve | Value | Comments |
+|--|--|--|
+| SearXNG Search URL | http://host.docker.internal:8888/search?format=json&q=<query> | Assuming local searxng dockerized |
+| Crawl4AI Base URL | http://host.docker.internal:11235 | Assuming local crawl4ai dockerized |
+| LLM Base URL |  http://host.docker.internal:11434 | Assuming local ollama dockerized |
+| LLM Provider and model  | ollama/hf.co/aman2024/NuExtract-2-2B-GGUF:Q3_K_M | Assuming ollama. The format is `backend/model`, so, ollama. |
+| LLM Temperature | 0 | Recommended value for NuExtract or Schematron models. |
+| Max Tokens used by Crawl4AI  | 1200 | Recommended to specify it so Crawl4AI doesn't take forever. |
+| LLM Max Tokens  | 1200 | Recommended to specify it so Crawl4AI doesn't take forever. |
+| Debug | true | Recommended unless you are going for production (which you should't). |
+
 ## ⚙️ Configuration Valves
 
 ### Global Settings (Valves)
