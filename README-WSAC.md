@@ -11,7 +11,7 @@ This tool enables your Open WebUI instance to not only search the internet but t
 
 - [✨ Key Features](#-key-features)
 - [🚀 How It Works](#-how-it-works)
-- [More Info](#more-info)
+- [🤔 Examples](#-examples)
 - [⚙️ Configuration Valves](#️-configuration-valves)
   - [Global Settings (Valves)](#global-settings-valves)
   - [Per‑User Settings (UserValves)](#peruser-settings-uservalves)
@@ -54,7 +54,7 @@ This tool enables your Open WebUI instance to not only search the internet but t
 
 ---
 
-# More info
+# 🤔 Examples
 The Crawl4AI LLM (you can specify in the valves) is smart enough to decide the best way to extract the content, but you can also do it manually if you want:
 
 | Prompt example | Description |
