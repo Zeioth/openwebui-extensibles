@@ -22,3 +22,11 @@ Given the prompt
 
 We've noted 'research disabled' is sending batches instead of working in parallel like research mode. Because of this, it can overflow the system resources easily and cause timeouts and error 500 on crawl4ai. A temporal solution is either limit tokens to a small amount, or reduce batch size.
 Also, if we keep bathces, we should apply them to all modes. But I don't find a great reason for using this approach atm...
+
+1. Maybe using batches so produce bigger context would take less tokens to find relevant context.
+
+2. Or maybe... There's an even better strategy we could implement. Like two passes. One with a quick model for structured data and few tokens, to discover what sources are relevant, and then a second pass with a more capable model to extract the relevant information with better quality.
+
+3. A third possiblity would be double down on step 1, and spend most tokens there to generate massive context (relevant, and irrelevant), and then a quick second step to produce a small, but very relevant response. There's risk to leave important info out this way though.
+
+Atm the moment we are keeping thing simple and using simple model for scraping, and our real powerful model on the chat to process everything. So a second step might not even be necessary. But we should measure all these ideas. At least, matematically, prior to manual testing, as each test take 2 minutes minimum.
