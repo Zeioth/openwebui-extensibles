@@ -185,7 +185,7 @@ These settings are not currently exposed to the user trough valves. The LLM will
 
 ---
 
-## How to debug
+## 🐞 How to debug
 If you find an issue configuring or using this function; Enable the debug valve and run this to see the logs
 ```
 sudo docker logs -f open-webui
@@ -193,6 +193,6 @@ sudo docker logs -f open-webui
 
 Assuming you use docker.
 
-## 🐞 Fork repo
+## ⭐ Fork repo
 
 Please log any issues [on the GitHub repository]([https://github.com/lexiismadd/openwebui-extensibles/issues](https://github.com/Zeioth/openwebui-extensibles)).
