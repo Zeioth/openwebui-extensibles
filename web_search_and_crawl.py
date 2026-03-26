@@ -80,154 +80,161 @@ class Tools:
         INITIAL_RESPONSE: str = Field(
             title="Initial delta response",
             default="I just need to do a search online to get some more info, I'll get back to you in a minute or so with a response if thats ok with you...",
-            description="Message shown when the tool starts.",
+            description="The response the tool will post in the chat window when it starts its search and crawl. Set as blank for no response.",
         )
         USE_NATIVE_SEARCH: bool = Field(
             title="Use Native Search",
             default=True,
-            description="Use OpenWebUI's native web search.",
+            description="Use OpenWebUI's native web search (in addition to or instead of SearXNG).",
         )
         SEARCH_WITH_SEARXNG: bool = Field(
             title="Search with SearXNG",
             default=False,
-            description="Use SearXNG for gathering additional URLs.",
+            description="Use SearXNG for gathering additional URLs for crawling.",
         )
         SEARXNG_BASE_URL: str = Field(
             title="SearXNG Search URL",
             default="http://searxng:8888/search?format=json&q=<query>",
-            description="Full URL for your SearXNG API instance.",
+            description="The full URL for your SearXNG API instance. Insert <query> where the search terms should go.",
         )
         SEARXNG_API_TOKEN: str = Field(
             title="SearXNG API Token",
             default="",
-            description="API token for SearXNG.",
+            description="The API token or Secret for your SearXNG instance.",
         )
         SEARXNG_METHOD: Literal["GET", "POST"] = Field(
             title="SearXNG HTTP Method",
             default="GET",
-            description="HTTP method for SearXNG API calls.",
+            description="HTTP method to use for SearXNG API calls (GET or POST).",
         )
         SEARXNG_TIMEOUT: int = Field(
             title="SearXNG Timeout",
             default=30,
-            description="Timeout (seconds) for SearXNG requests.",
+            description="The timeout (in seconds) for SearXNG API requests.",
         )
         SEARXNG_MAX_RESULTS: int = Field(
             title="SearXNG Max Results",
             default=10,
-            description="Maximum number of results from SearXNG.",
+            description="The maximum number of results to return from SearXNG.",
         )
         CRAWL4AI_BASE_URL: str = Field(
             title="Crawl4AI Base URL",
             default="http://crawl4ai:11235",
-            description="Base URL for your Crawl4AI instance.",
+            description="The base URL for your Crawl4AI instance.",
         )
         CRAWL4AI_USER_AGENT: str = Field(
             title="Crawl4AI User Agent",
             default="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.1.2.3 Safari/537.36",
-            description="Custom User-Agent for Crawl4AI.",
+            description="Custom User-Agent string for Crawl4AI.",
         )
         CRAWL4AI_TIMEOUT: int = Field(
             title="Crawl4AI Timeout",
             default=60,
-            description="Timeout (seconds) for Crawl4AI requests.",
+            description="The timeout (in seconds) for Crawl4AI requests.",
         )
         CRAWL4AI_BATCH: int = Field(
             title="Crawl4AI Batch",
             default=5,
-            description="Number of URLs to send per batch.",
+            description="The number of URLs to send to Crawl4AI per batch. If more than this number of URLs are found in total, the tool will send them to Crawl4AI in batches of this number. Useful for reducing the tokens used by the LLM per crawl.",
         )
         CRAWL4AI_MAX_URLS: int = Field(
             title="Crawl4AI Maximum URLs to crawl",
             default=20,
-            description="Maximum URLs to crawl.",
+            description="The maximum number of URLs to crawl with Crawl4AI.",
         )
         CRAWL4AI_EXTERNAL_DOMAINS: bool = Field(
             title="Crawl External Domains",
             default=False,
-            description="Allow crawling external domains.",
+            description="Allow Crawl4AI to crawl external/additional URL domains.",
         )
         CRAWL4AI_EXCLUDE_DOMAINS: str = Field(
             title="Excluded Domains",
             default="",
-            description="Comma-separated list of domains to exclude.",
+            description="Comma-separated list of external domains to exclude from crawling.",
         )
         CRAWL4AI_EXCLUDE_SOCIAL_MEDIA_DOMAINS: str = Field(
             title="Excluded Social Media Domains",
             default="facebook.com,twitter.com,x.com,linkedin.com,instagram.com,pinterest.com,tiktok.com,snapchat.com,reddit.com",
-            description="Social media domains to exclude.",
+            description="Comma-separated list of social media domains to exclude from crawling.",
         )
         CRAWL4AI_EXCLUDE_IMAGES: Literal["None", "External", "All"] = Field(
             title="Exclude Images",
             default="None",
-            description="Exclude images from crawling.",
+            description="Exclude images from crawling (None, External, All).",
         )
         CRAWL4AI_WORD_COUNT_THRESHOLD: int = Field(
             title="Word Count Threshold",
             default=200,
-            description="Minimum word count for content to be included.",
+            description="The minimum word count threshold for content to be included.",
         )
         CRAWL4AI_TEXT_ONLY: bool = Field(
             title="Text Only",
             default=False,
-            description="Extract only text, exclude images and media.",
+            description="Only extract text content, excluding images and other media. (Disables crawling and displaying media in the chat)",
         )
         CRAWL4AI_DISPLAY_MEDIA: bool = Field(
             title="Display Media in Chat",
             default=True,
-            description="Show images and videos in chat.",
+            description="Display images and videos as clickable links in the chat window.",
         )
         CRAWL4AI_MAX_MEDIA_ITEMS: int = Field(
             title="Max Media Items to Display",
             default=5,
-            description="Maximum number of media items to show (0 = unlimited).",
+            description="Maximum number of images/videos to display (0 = unlimited).",
         )
         CRAWL4AI_DISPLAY_THUMBNAILS: bool = Field(
             title="Display images as thumbnails",
             default=False,
-            description="Show thumbnails instead of full images.",
+            description="Display images as thumbnails in the chat window. Turn off to display images full-sized.",
         )
         CRAWL4AI_THUMBNAIL_SIZE: int = Field(
             title="Image thumbnail size",
             default=200,
-            description="Thumbnail size in pixels (square).",
+            description="Image thumbnail size (in px) square.  eg, setting 200 will mean thumbnails are 200x200px in size. Ignored if 'Display images as thumbnails' is off.",
         )
         CRAWL4AI_MIN_IMAGE_SCORE: int = Field(
             title="Min Image Score To Include",
             default=6,
             ge=0,
             le=10,
-            description="Minimum image score (0-10) to include.",
+            description="Minimum image score from Crawl4AI to consider including in the response. Min 0, Max 10.",
         )
         CRAWL4AI_VALIDATE_IMAGES: bool = Field(
             title="Validate Image Links",
             default=True,
-            description="Check if image URLs are accessible.",
+            description="Validate any image links to make sure they are accessible.",
         )
         CRAWL4AI_MAX_TOKENS: int = Field(
-            title="Max Tokens used by CrawlAI",
+            title="Max Tokens used by Crawl4AI",
             default=0,
-            description="Maximum tokens for content (0 = unlimited).",
+            description="Maximum tokens to use for the web search content response. Set to 0 for unlimited.",
         )
         LLM_BASE_URL: str = Field(
             title="LLM Base URL",
             default="https://openrouter.ai/api/v1",
-            description="Base URL for OpenAI-compatible LLM.",
+            description="The base URL for your preferred OpenAI-compatible LLM.",
         )
         LLM_API_TOKEN: str = Field(
             title="LLM API Token",
             default="",
-            description="API token for the LLM.",
+            description="Optional API Token for your preferred OpenAI-compatible LLM.",
         )
         LLM_PROVIDER: str = Field(
             title="LLM Provider and model",
             default="openrouter/@preset/default",
-            description="Provider/model in format: <provider>/<model>.",
+            description="The LLM provider and model to use (see https://docs.crawl4ai.com/core/browser-crawler-config/#3-llmconfig-essentials).",
+            examples=[
+                "openai/gpt-4o",
+                "ollama/llama-3-70b",
+                "openrouter/@preset/default",
+                "azure/gpt-4o",
+                "anthropic/claude-2",
+            ],
         )
         LLM_TEMPERATURE: float = Field(
             title="LLM Temperature",
             default=0.3,
-            description="LLM temperature.",
+            description="The temperature to use for the LLM.",
         )
         LLM_INSTRUCTION: str = Field(
             title="LLM Extraction Instruction",
@@ -248,37 +255,37 @@ class Tools:
             - Any other non-essential information
             Format the output as clean markdown with proper code blocks and headers.
             """,
-            description="Instruction for LLM extraction.",
+            description="The instruction to use for the LLM when extracting from the webpage.",
         )
         LLM_MAX_TOKENS: int = Field(
             title="LLM Max Tokens",
             default=4096,
-            description="Maximum tokens for LLM output.",
+            description="The maximum number of tokens to use for the LLM.",
         )
         LLM_TOP_P: float = Field(
             title="LLM Top P",
             default=None,
-            description="Top P sampling.",
+            description="The top_p value to use for the LLM.",
         )
         LLM_FREQUENCY_PENALTY: float = Field(
             title="LLM Frequency Penalty",
             default=None,
-            description="Frequency penalty.",
+            description="The frequency penalty to use for the LLM.",
         )
         LLM_PRESENCE_PENALTY: float = Field(
             title="LLM Presence Penalty",
             default=None,
-            description="Presence penalty.",
+            description="The presence penalty to use for the LLM.",
         )
         MORE_STATUS: bool = Field(
             title="More status updates",
             default=False,
-            description="Show extra status messages.",
+            description="Show more status updates during web search and crawl",
         )
         DEBUG: bool = Field(
             title="Debug logging",
             default=False,
-            description="Enable debug logging.",
+            description="Enable detailed debug logging",
         )
 
     # endregion
