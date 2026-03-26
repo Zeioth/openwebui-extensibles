@@ -1,3 +1,5 @@
+This fork fixes several bugs over the original project, adds better logging, and documentation. We normalize the crawled content to ensure no issue occur when processing data.
+
 # 🌐 Web Search and Crawl for Open WebUI
 
 **Version:** 2.8.4
