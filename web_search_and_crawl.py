@@ -279,7 +279,7 @@ class Tools:
         )
         MORE_STATUS: bool = Field(
             title="More status updates",
-            default=False,
+            default=True,
             description="Show more status updates during web search and crawl",
         )
         DEBUG: bool = Field(
