@@ -20,6 +20,7 @@ This tool enables your Open WebUI instance to not only search the internet but t
 - [🧩 Code Structure and Execution Flow](#-code-structure-and-execution-flow)
   - [Execution Flow](#execution-flow)
 - [📝 Notes on Research Mode Activation](#-notes-on-research-mode-activation)
+- [😉 Tips and Tricks](#-tips-and-tricks)
 - [🐞 How to debug](#-how-to-debug)
 - [⭐ Fork repo](#-fork-repo)
 
@@ -202,6 +203,11 @@ If both are set, the LLM’s `research_mode` takes precedence.
 These settings are not currently exposed to the user trough valves. The LLM will use them automatically, or though the prompt if the user want to enforce it.
 
 ---
+
+## 😉 Tips and tricks
+In order to speed up crawling, it's recommended to set your `LLM_PROVIDER` to something specialized for this kind of task. Good options are: 
+
+`hf.co/aman2024/NuExtract-2-2B-GGUF:Q3_K_M` (Which supports images and its faster) or `Inference/Schematron:3B` (Text only but more powerful).
 
 ## 🐞 How to debug
 If you find an issue configuring or using this function; Enable the debug valve and run this to see the logs
