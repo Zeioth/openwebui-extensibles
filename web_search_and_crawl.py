@@ -502,13 +502,18 @@ class Tools:
     # region ── Content Helpers ────────────────────────────────────────────────
 
     def _normalize_content(self, content_items: List[Any]) -> List[dict]:
-        """Normalize content to consistent dictionary format with topic and summary."""
+        """
+        Normalize extracted content to a consistent dictionary format with 'topic' and 'summary' keys.
+        Handles various input shapes: dicts, lists, strings, nested structures.
+        This is essential for consistent token counting and downstream processing.
+        """
         normalized = []
         for item in content_items:
             if isinstance(item, dict):
                 topic = item.get("topic", item.get("title", "Content"))
                 summary = item.get("summary", item.get("content", ""))
 
+                # Recursively flatten nested summaries (e.g., list of dicts)
                 if isinstance(summary, list):
                     summary_texts = []
                     for s in summary:
@@ -538,6 +543,7 @@ class Tools:
             elif isinstance(item, str):
                 normalized.append({"topic": "Extracted information", "summary": item})
             elif isinstance(item, list):
+                # Recursively process list items
                 normalized.extend(self._normalize_content(item))
             else:
                 normalized.append({"topic": "Content", "summary": str(item)})
@@ -554,7 +560,10 @@ class Tools:
     async def _truncate_content(
         self, content: str, max_tokens: int, model: str = "gpt-4"
     ) -> str:
-        """Truncate content to fit within max_tokens."""
+        """
+        Truncate content to fit within max_tokens by counting tokens with tiktoken
+        and cutting at the token limit. Adds a truncation notice.
+        """
         try:
             encoding = tiktoken.encoding_for_model(model)
         except KeyError:
@@ -573,7 +582,12 @@ class Tools:
     # region ── Image Validation ───────────────────────────────────────────────
 
     async def _validate_image_url(self, url: str) -> bool:
-        """Validate if an image URL is accessible and returns an image."""
+        """
+        Validate if an image URL is accessible and returns an image.
+        Uses a HEAD request with a short timeout and checks Content-Type.
+        The skip_auto_headers prevents aiohttp from adding its own Accept-Encoding,
+        which could cause issues with some servers.
+        """
         try:
             if not self.valves.CRAWL4AI_VALIDATE_IMAGES:
                 return True
@@ -986,23 +1000,25 @@ class Tools:
                             f"{len(crawled_batch.get('videos', []))} videos."
                         )
 
-                    # Compile images
+                    # Compile images (deduplicate by normalized base URL)
                     for img_url in crawled_batch.get("images", []):
                         parsed_image = urlparse(img_url)
                         base_image_url = f"{parsed_image.scheme}://{parsed_image.netloc}{parsed_image.path}"
                         if base_image_url in seen_images:
                             continue
                         seen_images.add(base_image_url)
+                        # Create a thumbnail URL using images.weserv.nl service
                         thumbnail_url = (
                             f"https://images.weserv.nl/?url={quote(img_url)}"
                             f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
                         )
+                        # Validate both the original and the thumbnail URL
                         if await self._validate_image_url(
                             img_url
                         ) and await self._validate_image_url(thumbnail_url):
                             image_list.append(img_url)
 
-                    # Compile videos
+                    # Compile videos (deduplicate by normalized base URL)
                     for vid_url in crawled_batch.get("videos", []):
                         parsed_video = urlparse(vid_url)
                         base_video_url = f"{parsed_video.scheme}://{parsed_video.netloc}{parsed_video.path}"
@@ -1016,9 +1032,11 @@ class Tools:
                     normalized_data_list = self._normalize_content(data_list)
 
                     if normalized_data_list:
+                        # Serialize to JSON to count tokens (tiktoken counts tokens in the actual string)
                         content_str = orjson.dumps(normalized_data_list).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
 
+                        # Apply per‑page token limit if configured
                         if (
                             self.valves.CRAWL4AI_MAX_TOKENS > 0
                             and page_tokens > self.valves.CRAWL4AI_MAX_TOKENS
@@ -1026,6 +1044,7 @@ class Tools:
                             content_str = await self._truncate_content(
                                 content_str, self.valves.CRAWL4AI_MAX_TOKENS
                             )
+                            # Re‑parse truncated JSON to keep structure
                             try:
                                 normalized_data_list = orjson.loads(
                                     content_str.replace(
@@ -1040,6 +1059,7 @@ class Tools:
                                     f"Truncated content from batch to {self.valves.CRAWL4AI_MAX_TOKENS} tokens"
                                 )
 
+                        # Check global token budget (sum across all pages)
                         if (
                             self.valves.CRAWL4AI_MAX_TOKENS > 0
                             and total_tokens + page_tokens
@@ -1149,6 +1169,11 @@ class Tools:
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
         """Route to the appropriate research crawling strategy."""
+        # Each strategy has a different approach:
+        # - pseudo_adaptive: keyword scoring priority queue
+        # - llm_guided: LLM selects next links (placeholder for now)
+        # - bfs_deep: breadth‑first search with depth limit
+        # - research_filter: seed URLs + follow high‑scoring links
         if mode == ResearchCrawlMode.PSEUDO_ADAPTIVE:
             return await self._pseudo_adaptive_crawl(
                 urls, query, max_tokens, __event_emitter__
@@ -1184,6 +1209,10 @@ class Tools:
         max_tokens: int = 0,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
+        """
+        Pseudo‑adaptive crawl: scores URLs based on keyword match, uses a priority queue.
+        It crawls the highest‑scoring URLs first up to max_pages and max_depth.
+        """
         from collections import deque
 
         max_pages = self.user_valves.RESEARCH_MAX_PAGES
@@ -1198,6 +1227,7 @@ class Tools:
         all_videos = []
         total_tokens = 0
 
+        # Initial queue: each entry is (url, depth, score)
         queue = deque()
         for url in start_urls[:5]:
             if url not in crawled_pages:
@@ -1211,6 +1241,7 @@ class Tools:
             and len(crawled_pages) < max_pages
             and (max_tokens == 0 or total_tokens < max_tokens)
         ):
+            # Take a batch from the queue, sort by score descending
             batch = []
             for _ in range(min(batch_size, len(queue))):
                 if queue:
@@ -1240,7 +1271,7 @@ class Tools:
                 result = await self._crawl_url(
                     urls=[url],
                     query=query,
-                    extract_links=True,
+                    extract_links=True,  # Request link extraction for deeper crawling.
                     __event_emitter__=__event_emitter__,
                 )
 
@@ -1250,6 +1281,7 @@ class Tools:
                         content_str = orjson.dumps(normalized_content).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
 
+                        # Apply per‑page token truncation if needed
                         if max_tokens > 0 and page_tokens > max_tokens:
                             content_str = await self._truncate_content(
                                 content_str, max_tokens
@@ -1268,6 +1300,7 @@ class Tools:
                                     f"Truncated content from {url} to {max_tokens} tokens"
                                 )
 
+                        # Check global token budget
                         if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
                             logger.warning(
                                 f"Token limit reached. Stopping further research crawling."
@@ -1295,12 +1328,14 @@ class Tools:
                 if max_tokens > 0 and total_tokens >= max_tokens:
                     break
 
+                # Enqueue new links if depth not exceeded
                 if depth < max_depth:
                     for link in result.get("links", []):
                         if link in crawled_pages:
                             continue
                         parsed_link = urlparse(link)
                         parsed_url = urlparse(url)
+                        # Respect domain restrictions
                         if (
                             not include_external
                             and parsed_link.netloc
@@ -1334,8 +1369,11 @@ class Tools:
         max_tokens: int = 0,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
+        """
+        LLM‑guided crawl: uses an LLM to select which links to follow next.
+        (Currently only scores links by keyword; full LLM selection is a placeholder.)
+        """
         max_pages = self.user_valves.RESEARCH_MAX_PAGES
-        use_llm_selection = self.user_valves.RESEARCH_LLM_LINK_SELECTION
         include_external = self.user_valves.RESEARCH_INCLUDE_EXTERNAL
 
         crawled_pages = set()
@@ -1382,7 +1420,7 @@ class Tools:
             result = await self._crawl_url(
                 urls=[current_url],
                 query=query,
-                extract_links=True,
+                extract_links=True,  # Request link extraction for deeper crawling.
                 __event_emitter__=__event_emitter__,
             )
 
@@ -1453,22 +1491,23 @@ class Tools:
             if not discovered_links:
                 continue
 
-            if use_llm_selection:
-                # LLM link selection placeholder
-                pass
-
+            # Currently falls back to keyword scoring.
             keywords = query.lower().split()
-            scored_links = [
-                (link, sum(1 for kw in keywords if kw in link.lower()))
-                for link in discovered_links
-                if link not in crawled_pages and link not in urls_to_process
-            ]
-            scored_links = [(link, s) for link, s in scored_links if s > 0]
+            scored_links = []
+            for link in discovered_links:
+                if link in crawled_pages or link in urls_to_process:
+                    continue
+                score = sum(1 for kw in keywords if kw in link.lower())
+                if score > 0:
+                    scored_links.append((link, score))
             scored_links.sort(key=lambda x: x[1], reverse=True)
 
             for link, _ in scored_links[:3]:
                 if link not in urls_to_process and link not in crawled_pages:
                     urls_to_process.append(link)
+
+            if max_tokens > 0 and total_tokens >= max_tokens:
+                break
 
         if self.valves.DEBUG:
             logger.info(
@@ -1490,6 +1529,10 @@ class Tools:
         max_tokens: int = 0,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
+        """
+        Breadth‑first deep crawl: explores pages layer by layer up to max_depth,
+        respecting domain restrictions.
+        """
         from collections import deque
 
         max_pages = self.user_valves.RESEARCH_MAX_PAGES
@@ -1539,7 +1582,7 @@ class Tools:
                 result = await self._crawl_url(
                     urls=[url],
                     query=query,
-                    extract_links=True,
+                    extract_links=True,  # Request link extraction for deeper crawling.
                     __event_emitter__=__event_emitter__,
                 )
 
@@ -1630,6 +1673,10 @@ class Tools:
         max_tokens: int = 0,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
+        """
+        Research‑filter crawl: starts from seed URLs, extracts content and relevant links,
+        then follows the most promising links based on keyword score.
+        """
         max_pages = self.user_valves.RESEARCH_MAX_PAGES
         include_external = self.user_valves.RESEARCH_INCLUDE_EXTERNAL
         keywords = query.lower().split()
@@ -1645,7 +1692,8 @@ class Tools:
 
         total_tokens = 0
 
-        for source_url in start_urls[:5]:
+        for source_url in start_urls[:5]:  # Max 5 starting sources
+            # Stop if we already reached the page limit
             if results["total_pages"] >= max_pages:
                 break
 
@@ -1663,7 +1711,7 @@ class Tools:
             source_result = await self._crawl_url(
                 urls=[source_url],
                 query=query,
-                extract_links=True,
+                extract_links=True,  # Request link extraction for deeper crawling.
                 __event_emitter__=__event_emitter__,
             )
 
@@ -1727,6 +1775,7 @@ class Tools:
             if max_tokens > 0 and total_tokens >= max_tokens:
                 break
 
+            # Score links from the source page
             scored_links = []
             for link in source_result.get("links", [])[:15]:
                 if results["total_pages"] >= max_pages:
@@ -1735,6 +1784,7 @@ class Tools:
                 if score > 0:
                     scored_links.append((link, score))
 
+            # Sort links by relevance to crawl the most promising first
             scored_links.sort(key=lambda x: x[1], reverse=True)
 
             crawled = 0
@@ -1743,7 +1793,7 @@ class Tools:
                     break
                 if max_tokens > 0 and total_tokens >= max_tokens:
                     break
-
+                # Check domain
                 if not include_external:
                     parsed_link = urlparse(link)
                     parsed_source = urlparse(source_url)
@@ -1823,7 +1873,7 @@ class Tools:
             if max_tokens > 0 and total_tokens >= max_tokens:
                 break
 
-        # Final normalization and relevance sort
+        # Final normalization and sort by relevance
         results["content"] = self._normalize_content(results["content"])
         results["content"].sort(
             key=lambda x: sum(
@@ -1994,7 +2044,8 @@ class Tools:
                 url = item.get("url", "")
                 parsed_url = urlparse(url)
 
-                # ── Extract images ─────────────────────────────────────────────
+                # ── Extract images with scoring ─────────────────────────────────
+                # Only include images that meet the minimum score threshold.
                 image_list = []
                 for img in filter(
                     lambda x: x.get("score", 0) >= self.valves.CRAWL4AI_MIN_IMAGE_SCORE,
@@ -2013,7 +2064,7 @@ class Tools:
                         seen_images.add(key)
                         image_list.append(src)
 
-                # ── Extract videos ─────────────────────────────────────────────
+                # ── Extract videos (simple heuristic, score ≥ 5) ─────────────────
                 video_list = []
                 for vid in filter(
                     lambda x: x.get("score", 0) >= 5,
@@ -2051,7 +2102,7 @@ class Tools:
                     {"type": "files", "data": {"files": image_list + video_list}}
                 )
 
-                # ── Parse extracted content ────────────────────────────────────
+                # ── Parse extracted_content from Crawl4AI (JSON string or object) ─
                 try:
                     extracted_content = item.get("extracted_content", "[]")
                     if isinstance(extracted_content, str):
