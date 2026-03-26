@@ -185,6 +185,6 @@ These settings are not currently exposed to the user trough valves. The LLM will
 
 ---
 
-## 🐞 Issues
+## 🐞 Fork repo
 
-Please log any issues [on the GitHub repository](https://github.com/lexiismadd/openwebui-extensibles/issues).
+Please log any issues [on the GitHub repository]([https://github.com/lexiismadd/openwebui-extensibles/issues](https://github.com/Zeioth/openwebui-extensibles)).
