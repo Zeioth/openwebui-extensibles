@@ -47,3 +47,85 @@ After that:
 - This is mostly useless, but it uses CPU time and we are using none so far, so we can likely leverage that on parallel, even. It should take 1-2s per page
 - Then we send only those top *k* pages to _crawl_url for full GPU extraction. Because you are processing fewer pages, we can afford to give each one a larger token budget (increase CRAWL4AI_MAX_TOKENS per page or allocate more tokens overall).
 - Extra: On research mode, we can use the top *k* pages as the seeds for the chosen research strategy. That way, deep crawling starts from the most promising sources.
+
+
+# Why This Gives a 4× Speedup
+
+    * Old: N = 10 pages, each heavy extraction ~20 s → 200 s total.
+    * New: lightweight fetch for 10 pages takes ~2 s each in parallel → ~2–5 s total. Then heavy extraction on k = 2 pages → 40 s. Total ~45 s → 4.4× speedup.
+
+Even if lightweight fetch takes 3–4 seconds per page (parallel), it’s still a small fraction compared to saving 160 s of GPU time.
+
+If a page fails the lightweight fetch (low text), we can fallback to using Crawl4AI for that URL. This adds a bit of time but ensures we don’t miss important JS‑rendered content.
+
+Example: after lightweight fetch, for pages with very little text (<200 chars) but a high initial ranking (e.g., among the top 3 search results), you could force‑include them for heavy extraction.
+
+Vibe coded prototype:
+
+```
+async def _lightweight_fetch(
+    self, 
+    url: str, 
+    __event_emitter__: Callable = None
+) -> dict:
+    """
+    Fetch a URL quickly, extract clean text, and return a simple relevance score.
+    Returns a dict with keys: 'url', 'text', 'score', 'error'.
+    """
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+        }
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return {"url": url, "error": f"HTTP {resp.status}", "score": 0}
+                html = await resp.text()
+                # Use a fast text extractor (trafilatura, readability, or a simple regex)
+                try:
+                    import trafilatura
+                    text = trafilatura.extract(html, include_comments=False, no_fallback=False)
+                except ImportError:
+                    # fallback: remove script/style tags, keep plain text
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html, 'html.parser')
+                    for tag in soup(["script", "style", "nav", "footer"]):
+                        tag.decompose()
+                    text = soup.get_text(separator=" ", strip=True)
+                if not text or len(text) < 200:
+                    return {"url": url, "error": "Too little text", "score": 0}
+                # Compute simple relevance score (e.g., keyword frequency)
+                keywords = self._query_keywords
+                score = sum(text.lower().count(kw) for kw in keywords)
+                return {"url": url, "text": text, "score": score}
+    except Exception as e:
+        return {"url": url, "error": str(e), "score": 0}
+```
+
+Then modify the crawler function
+
+```
+# Store query keywords for scoring
+self._query_keywords = query.lower().split()
+
+# Lightweight fetch all gathered URLs (parallel)
+if __event_emitter__:
+    await __event_emitter__({"type": "status", "data": {"description": "Quickly inspecting pages...", "done": False}})
+
+light_tasks = [self._lightweight_fetch(url, __event_emitter__) for url in gathered_urls]
+light_results = await asyncio.gather(*light_tasks)
+
+# Sort by score and keep top k
+k = 2  # can be a valve or user valve
+scored = [r for r in light_results if r.get("score", 0) > 0]
+scored.sort(key=lambda x: x["score"], reverse=True)
+selected_urls = [r["url"] for r in scored[:k]]
+
+if not selected_urls:
+    # fallback to first few URLs (maybe the lightweight fetch failed for all)
+    selected_urls = gathered_urls[:k]
+
+if __event_emitter__:
+    await __event_emitter__({"type": "status", "data": {"description": f"Selected {len(selected_urls)} most relevant pages.", "done": False}})
+```
