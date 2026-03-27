@@ -62,7 +62,7 @@ Example: after lightweight fetch, for pages with very little text (<200 chars) b
 
 Vibe coded prototype:
 
-```
+```python
 async def _lightweight_fetch(
     self, 
     url: str, 
@@ -105,7 +105,7 @@ async def _lightweight_fetch(
 
 Then modify the crawler function
 
-```
+```python
 # Store query keywords for scoring
 self._query_keywords = query.lower().split()
 
