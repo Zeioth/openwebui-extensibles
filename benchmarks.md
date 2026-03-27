@@ -37,7 +37,7 @@ But very likely there's other stuff we could optimize before recurring to that. 
 
 Overall our profiling level is quite good at base, and we are using 100% GPU. So the best way to improve performance would be reducing the amount of load. For that, prioritary things are:
 
-- Reduding the amount of pages to scrape.
+- Reducing the amount of pages to scrape.
 - For that we must ensure the quality of the ones we scrape.
 - For that let's assume we can trust the ranking of the search engine.
 - But for that to be true, we must be able to transport the chat's user request as literal as possible to the search engine. Otherwise, we can't make results predictible.
