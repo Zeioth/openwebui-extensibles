@@ -33,7 +33,7 @@ At the moment we are keeping thing simple and using simple model for scraping, a
 
 I'm gonna save you the math, but two‑pass filtering is ~20% superior for the same token budget when r < 1. It allows concentrating tokens on the subset of pages that matter, yielding higher extraction quality per relevant page. It also uses fewer total tokens (if we keep the same budget, we can allocate even more tokens to the second pass, improving quality further).
 
-But very likely there's other stuff we could optimize before recurring to that. Which an average of 200s per query, we need at least a x4 improvement to achieve an OK user experience.
+But very likely there's other stuff we could optimize before recurring to that. Whith an average of 200s per query, we need at least a x4 improvement to achieve an OK user experience.
 
 Overall our profiling level is quite good at base, and we are using 100% GPU. So the best way to improve performance would be reducing the amount of load. For that, prioritary things are:
 
