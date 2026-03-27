@@ -103,7 +103,7 @@ async def _lightweight_fetch(
         return {"url": url, "error": str(e), "score": 0}
 ```
 
-Then modify the crawler function
+Then add this to the entry point search_and_crawl function 
 
 ```python
 # Store query keywords for scoring
