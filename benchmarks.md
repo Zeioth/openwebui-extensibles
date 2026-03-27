@@ -517,4 +517,4 @@ async def search_and_crawl(
 
 (Solution not tested yet)
 
-> NOTE: Let's consider on average, extracting information from an image takes 750 tokens, which is about as expensive as craping an entire page. So very likely it's better if after further testing, we swap to schematron for pure json text output, and ignoring images entirely.
+> NOTE: Let's consider on average, extracting information from an image takes 750 tokens, which is about as expensive as scraping an entire page. So very likely it's better if after further testing, we swap to schematron for pure json text output, and ignoring images entirely.
