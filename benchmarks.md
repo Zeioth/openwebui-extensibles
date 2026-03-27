@@ -42,4 +42,8 @@ Overall our profiling level is quite good at base, and we are using 100% GPU. So
 - For that let's assume we can trust the ranking of the search engine.
 - But for that to be true, we must be able to transport the chat's user request as literal as possible to the search engine. Otherwise, we can't make results predictible.
 
-I'm sleepy. Good night.
+After that:
+- Use aiohttp and a simple HTML parser (e.g., trafilatura or readability) to extract the first n characters from the body and find keywords from the user query.
+- This is mostly useless, but it uses CPU time and we are using none so far, so we can likely leverage that on parallel, even. It should take 1-2s per page
+- Then we send only those top *k* pages to _crawl_url for full GPU extraction. Because you are processing fewer pages, we can afford to give each one a larger token budget (increase CRAWL4AI_MAX_TOKENS per page or allocate more tokens overall).
+- Extra: On research mode, we can use the top *k* pages as the seeds for the chosen research strategy. That way, deep crawling starts from the most promising sources.
