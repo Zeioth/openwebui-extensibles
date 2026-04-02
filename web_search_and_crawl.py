@@ -549,6 +549,75 @@ class Tools:
                 normalized.append({"topic": "Content", "summary": str(item)})
         return normalized
 
+    def _is_html_url(self, url: str) -> bool:
+        """
+        Returns True if the URL likely points to an HTML page (renderable content).
+        Uses a whitelist of HTML extensions and allows paths without extension.
+        """
+        if not url or url.startswith(("javascript:", "mailto:", "tel:", "data:")):
+            return False
+
+        parsed = urlparse(url)
+        path = parsed.path.rstrip("/")
+
+        # Root or empty path -> HTML
+        if not path or path == "/":
+            return True
+
+        last_segment = path.split("/")[-1]
+        # No dot -> likely a route without extension (e.g., /article/123)
+        if "." not in last_segment:
+            return True
+
+        html_extensions = (
+            ".html",
+            ".htm",
+            ".php",
+            ".asp",
+            ".aspx",
+            ".jsp",
+            ".jspx",
+            ".do",
+            ".action",
+            ".cgi",
+            ".pl",
+            ".shtml",
+            ".xhtml",
+            ".cfm",
+            ".phtml",
+        )
+        ext = "." + last_segment.split(".")[-1].lower()
+        return ext in html_extensions
+
+    async def _is_accessible_html(self, url: str) -> bool:
+        """
+        Perform a quick HEAD request to check if the URL is accessible and returns HTML.
+        Timeout is short (5 seconds) to avoid delaying the crawl.
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.head(url, allow_redirects=True) as resp:
+                    if resp.status >= 400:
+                        if self.valves.DEBUG:
+                            logger.debug(f"HEAD {url} -> status {resp.status}")
+                        return False
+                    content_type = resp.headers.get("Content-Type", "").lower()
+                    is_html = "text/html" in content_type
+                    if self.valves.DEBUG and not is_html:
+                        logger.debug(
+                            f"HEAD {url} -> Content-Type: {content_type} (not HTML)"
+                        )
+                    return is_html
+        except asyncio.TimeoutError:
+            if self.valves.DEBUG:
+                logger.debug(f"HEAD timeout for {url}")
+            return False
+        except Exception as e:
+            if self.valves.DEBUG:
+                logger.debug(f"HEAD error for {url}: {str(e)}")
+            return False
+
     async def _count_tokens(self, text: str, model: str = "gpt-4") -> int:
         """Count tokens in text using tiktoken."""
         try:
@@ -863,7 +932,7 @@ class Tools:
             for url in urls:
                 if not url.startswith("http"):
                     url = f"https://{url}"
-                if url not in gathered_urls:
+                if self._is_html_url(url) and url not in gathered_urls:
                     gathered_urls.append(url)
 
         if __event_emitter__ and str(self.valves.INITIAL_RESPONSE).strip() != "":
@@ -1918,6 +1987,31 @@ class Tools:
             for url in urls
         ]
 
+        # Quick accessibility check (HEAD requests) to avoid sending unreachable URLs to Crawl4AI
+        if self.valves.DEBUG:
+            logger.info(f"Checking accessibility for {len(urls)} URLs...")
+        # Run HEAD requests in parallel
+        tasks = [self._is_accessible_html(url) for url in urls]
+        results = await asyncio.gather(*tasks)
+        accessible_urls = [url for url, ok in zip(urls, results) if ok]
+        if self.valves.DEBUG:
+            logger.info(f"Accessible HTML URLs: {len(accessible_urls)}/{len(urls)}")
+
+        if not accessible_urls:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "No accessible HTML pages found after pre-flight checks.",
+                            "done": True,
+                        },
+                    }
+                )
+            return {"content": [], "images": [], "videos": [], "links": []}
+
+        urls = accessible_urls
+
         base_url = self.valves.CRAWL4AI_BASE_URL.rstrip("/")
         endpoint = f"{base_url}/crawl"
 
@@ -2095,7 +2189,7 @@ class Tools:
                                 if match.startswith("/")
                                 else f"{parsed_url.scheme}://{parsed_url.netloc}/{match}"
                             )
-                        if match.startswith("http"):
+                        if match.startswith("http") and self._is_html_url(match):
                             all_links.append(match)
 
                 await __event_emitter__(
