@@ -2215,7 +2215,7 @@ class Tools:
                     for content_item in tmp_content:
                         if (
                             isinstance(content_item, dict)
-                            and content_item.get("error") is not False
+                            and content_item.get("error") is False
                         ):
                             content_list.append(
                                 {
