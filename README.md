@@ -237,3 +237,7 @@ Assuming you use docker.
 ## ⭐ Fork repo
 
 Please log any issues [on the GitHub repository](https://github.com/Zeioth/openwebui-extensibles).
+
+## TODOS
+
+* Often, out of 10 search results, there is 1-2 of them highly superior in content. Therefore it's almost certain doing a second pass of those 1-2 best sites will increase the relevance of response considerably.
