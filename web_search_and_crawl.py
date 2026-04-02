@@ -549,6 +549,34 @@ class Tools:
                 normalized.append({"topic": "Content", "summary": str(item)})
         return normalized
 
+    async def _has_keywords(self, url: str, keywords: List[str]) -> bool:
+        """
+        Fetch the first 50 KB of a URL and check if at least one keyword appears
+        in the page text. Returns True on any network error (conservative fallback).
+        """
+        try:
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, allow_redirects=True) as resp:
+                    if resp.status >= 400:
+                        return False
+                    chunk = await resp.content.read(50 * 1024)
+                    text = re.sub(
+                        r"<[^>]+>", " ", chunk.decode("utf-8", errors="ignore")
+                    ).lower()
+                    matched = any(kw in text for kw in keywords)
+                    if self.valves.DEBUG and not matched:
+                        logger.debug(f"GET {url} -> no keywords found, skipping")
+                    return matched
+        except asyncio.TimeoutError:
+            if self.valves.DEBUG:
+                logger.debug(f"GET timeout for {url}, passing through")
+            return True
+        except Exception as e:
+            if self.valves.DEBUG:
+                logger.debug(f"GET error for {url}: {str(e)}, passing through")
+            return True
+
     def _is_html_url(self, url: str) -> bool:
         """
         Returns True if the URL likely points to an HTML page (renderable content).
@@ -2011,6 +2039,22 @@ class Tools:
             return {"content": [], "images": [], "videos": [], "links": []}
 
         urls = accessible_urls
+
+        # Keyword preflight: discard pages without relevant content
+        if query:
+            preflight_keywords = [
+                re.sub(r"[^\w]", "", kw).lower()
+                for kw in query.split()
+                if re.sub(r"[^\w]", "", kw)
+            ]
+            if preflight_keywords:
+                tasks = [self._has_keywords(url, preflight_keywords) for url in urls]
+                results = await asyncio.gather(*tasks)
+                urls = [url for url, ok in zip(urls, results) if ok]
+                if self.valves.DEBUG:
+                    logger.info(f"URLs after keyword preflight: {len(urls)}")
+                if not urls:
+                    return {"content": [], "images": [], "videos": [], "links": []}
 
         base_url = self.valves.CRAWL4AI_BASE_URL.rstrip("/")
         endpoint = f"{base_url}/crawl"
