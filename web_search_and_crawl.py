@@ -580,7 +580,7 @@ class Tools:
 
         url_lower = url.lower()
 
-        # Extensiones de archivos estáticos a excluir
+        # Static file extensions to exclude
         static_extensions = (
             ".css",
             ".js",
@@ -610,75 +610,75 @@ class Tools:
             ".txt",
         )
 
-        # Patrones específicos de Wikipedia
+        # Wikipedia-specific patterns to exclude
         wikipedia_exclude_patterns = (
-            "/w/load.php",  # Archivos de carga dinámica
-            "/w/api.php",  # API de Wikipedia
-            "/w/index.php?title=",  # Páginas de edición/historial
-            "action=edit",  # Edición
-            "action=history",  # Historial
+            "/w/load.php",  # Dynamic load files
+            "/w/api.php",  # Wikipedia API
+            "/w/index.php?title=",  # Edit/history pages
+            "action=edit",  # Edit
+            "action=history",  # History
             "action=raw",  # Raw content
-            "action=info",  # Info de página
-            "action=render",  # Renderizado
-            "action=submit",  # Envío de formulario
-            "action=delete",  # Eliminación
-            "action=protect",  # Protección
-            "action=unprotect",  # Desprotección
-            "action=move",  # Mover página
-            "special:recentchanges",  # Cambios recientes
-            "special:whatlinkshere",  # Qué enlaza aquí
-            "special:export",  # Exportar
-            "special:permalink",  # Enlace permanente
-            "special:search",  # Búsqueda (página de resultados)
+            "action=info",  # Page info
+            "action=render",  # Render
+            "action=submit",  # Form submission
+            "action=delete",  # Deletion
+            "action=protect",  # Protection
+            "action=unprotect",  # Unprotection
+            "action=move",  # Move page
+            "special:recentchanges",  # Recent changes
+            "special:whatlinkshere",  # What links here
+            "special:export",  # Export
+            "special:permalink",  # Permanent link
+            "special:search",  # Search (results page)
             "special:userlogin",  # Login
-            "special:createaccount",  # Crear cuenta
-            "special:upload",  # Subir archivos
-            "oldid=",  # Versiones antiguas
-            "diff=",  # Diferencias entre versiones
-            "printable=yes",  # Versión imprimible
-            "mobileaction=",  # Versión móvil
-            "veaction=edit",  # Editor visual
-            "section=",  # Sección específica
-            "#",  # Anclas internas
-            ".wikipedia.org/wiki/special:",  # Especial en minúsculas
+            "special:createaccount",  # Create account
+            "special:upload",  # Upload files
+            "oldid=",  # Old versions
+            "diff=",  # Differences between versions
+            "printable=yes",  # Printable version
+            "mobileaction=",  # Mobile version
+            "veaction=edit",  # Visual editor
+            "section=",  # Specific section
+            "#",  # Internal anchors
+            ".wikipedia.org/wiki/special:",  # Special in lowercase
         )
 
-        # Patrones específicos de Reddit
+        # Reddit-specific patterns to exclude
         reddit_exclude_patterns = (
-            "/r/",  # Subreddits (procesamiento especial)
-            "/user/",  # Perfiles de usuario
-            "/comments/",  # Comentarios individuales
-            "/wiki/",  # Wikis de subreddits
-            "/message/",  # Mensajes
-            "/submit/",  # Envío de posts
+            "/r/",  # Subreddits (special processing)
+            "/user/",  # User profiles
+            "/comments/",  # Individual comments
+            "/wiki/",  # Subreddit wikis
+            "/message/",  # Messages
+            "/submit/",  # Post submission
             "/login/",  # Login
-            "/register/",  # Registro
-            "/settings/",  # Configuración
-            "/prefs/",  # Preferencias
-            "/r/all/",  # All (demasiado genérico)
-            "/r/popular/",  # Popular (genérico)
-            "?sort=",  # Parámetros de ordenamiento
-            "?limit=",  # Límites
-            "?after=",  # Paginación
-            "?before=",  # Paginación
-            "?context=",  # Contexto
-            "?depth=",  # Profundidad
+            "/register/",  # Registration
+            "/settings/",  # Settings
+            "/prefs/",  # Preferences
+            "/r/all/",  # All (too generic)
+            "/r/popular/",  # Popular (generic)
+            "?sort=",  # Sort parameters
+            "?limit=",  # Limits
+            "?after=",  # Pagination
+            "?before=",  # Pagination
+            "?context=",  # Context
+            "?depth=",  # Depth
             "/api/",  # API endpoints
-            "/embed/",  # Embebidos
-            "/saved/",  # Guardados
+            "/embed/",  # Embedded
+            "/saved/",  # Saved
             "/upvoted/",  # Upvoted
             "/downvoted/",  # Downvoted
-            "/hidden/",  # Ocultos
+            "/hidden/",  # Hidden
             "/gilded/",  # Gilded
-            "/submitted/",  # Envíos del usuario
+            "/submitted/",  # User submissions
         )
 
-        # Patrones específicos de GitHub
+        # GitHub-specific patterns to exclude
         github_exclude_patterns = (
-            "/raw/",  # Raw content (sin procesar)
-            "/blob/",  # Archivos individuales (excepto README)
-            "/commit/",  # Commits individuales
-            "/commits/",  # Historial de commits
+            "/raw/",  # Raw content (unprocessed)
+            "/blob/",  # Individual files (except README)
+            "/commit/",  # Individual commits
+            "/commits/",  # Commit history
             "/issues/",  # Issues
             "/pull/",  # Pull requests
             "/pulls/",  # Pull requests list
@@ -689,7 +689,7 @@ class Tools:
             "/tags/",  # Tags
             "/branches/",  # Branches
             "/insights/",  # Insights
-            "/settings/",  # Configuración
+            "/settings/",  # Settings
             "/security/",  # Security
             "/labels/",  # Labels
             "/milestones/",  # Milestones
@@ -703,10 +703,10 @@ class Tools:
             ".patch",  # Patch files
             ".diff",  # Diff files
             "?tab=",  # Tab parameters
-            "#readme",  # README anchor (redundante)
+            "#readme",  # README anchor (redundant)
         )
 
-        # Patrones generales a excluir
+        # General patterns to exclude
         general_exclude_patterns = (
             "/login",
             "/logout",
@@ -765,26 +765,26 @@ class Tools:
             "/wiki/Special:",
         )
 
-        # Verificar extensiones estáticas
+        # Check static extensions
         if any(url_lower.endswith(ext) for ext in static_extensions):
             if self.valves.DEBUG:
                 logger.debug(f"Filtered: Static file extension - {url}")
             return False
 
-        # Verificar patrones de Wikipedia
+        # Check Wikipedia patterns
         if "wikipedia.org" in url_lower:
             if any(pattern in url_lower for pattern in wikipedia_exclude_patterns):
                 if self.valves.DEBUG:
                     logger.debug(f"Filtered: Wikipedia non-content page - {url}")
                 return False
-            # Verificar que sea un artículo de Wikipedia (formato /wiki/Nombre_Articulo)
+            # Verify it's a Wikipedia article (format /wiki/Article_Name)
             wiki_path = urlparse(url).path
             if not wiki_path.startswith("/wiki/") or len(wiki_path) < 7:
                 if self.valves.DEBUG:
                     logger.debug(f"Filtered: Not a Wikipedia article - {url}")
                 return False
 
-        # Verificar namespaces de Wikipedia (siempre excluidos)
+        # Check Wikipedia namespaces (always excluded)
         if "wikipedia.org" in url_lower:
             wikipedia_namespaces = (
                 "/wiki/wikipedia:",
@@ -803,26 +803,26 @@ class Tools:
                     logger.debug(f"Filtered: Wikipedia namespace page - {url}")
                 return False
 
-        # Verificar patrones de Reddit
+        # Check Reddit patterns
         if "reddit.com" in url_lower or "redd.it" in url_lower:
-            # Excluir URLs que no son posts principales
+            # Exclude URLs that are not main posts
             if any(pattern in url_lower for pattern in reddit_exclude_patterns):
                 if self.valves.DEBUG:
                     logger.debug(f"Filtered: Reddit non-post page - {url}")
                 return False
-            # Para Reddit, prefiero posts de texto (self posts) y posts normales
+            # For Reddit, prefer text posts (self posts) and regular posts
             if "/comments/" not in url_lower:
                 if self.valves.DEBUG:
                     logger.debug(f"Filtered: Not a Reddit post - {url}")
                 return False
 
-        # Verificar patrones de GitHub
+        # Check GitHub patterns
         if "github.com" in url_lower:
             if any(pattern in url_lower for pattern in github_exclude_patterns):
                 if self.valves.DEBUG:
                     logger.debug(f"Filtered: GitHub non-content page - {url}")
                 return False
-            # Para GitHub, prefiero READMEs y archivos markdown
+            # For GitHub, prefer READMEs and markdown files
             if "/blob/" in url_lower:
                 allowed_extensions = (".md", ".markdown", ".txt", ".rst", ".adoc")
                 if not any(url_lower.endswith(ext) for ext in allowed_extensions):
@@ -830,19 +830,19 @@ class Tools:
                         logger.debug(f"Filtered: GitHub non-readme file - {url}")
                     return False
 
-        # Verificar patrones generales
+        # Check general patterns
         if any(pattern in url_lower for pattern in general_exclude_patterns):
             if self.valves.DEBUG:
                 logger.debug(f"Filtered: General exclude pattern - {url}")
             return False
 
-        # Verificar longitud de la URL
+        # Check URL length
         if len(url) > 500:
             if self.valves.DEBUG:
                 logger.debug(f"Filtered: URL too long ({len(url)} chars)")
             return False
 
-        # Verificar demasiados parámetros
+        # Check too many parameters
         parsed_url = urlparse(url)
         if parsed_url.query:
             query_params = parse_qs(parsed_url.query)
@@ -859,7 +859,7 @@ class Tools:
         """
         Fetch the page and check keywords in title and main content area.
         """
-        # BYPASS para dominios confiables
+        # BYPASS for trusted domains
         trusted_domains = ["wikipedia.org", "wikimedia.org"]
         for domain in trusted_domains:
             if domain in url:
@@ -980,7 +980,7 @@ class Tools:
         """HTML check with forced acceptance for Wikipedia."""
         if "wikipedia.org" in url:
             if self.valves.DEBUG:
-                logger.debug(f"BYPASS: Wikipedia URL aceptada automáticamente: {url}")
+                logger.debug(f"BYPASS: Wikipedia URL automatically accepted: {url}")
             return True
 
         try:
@@ -1063,14 +1063,90 @@ class Tools:
 
     # endregion
 
+    # region ── URL Validation Pipeline ────────────────────────────────────────
+
+    async def _validate_url_pipeline(
+        self,
+        urls: List[str],
+        query: Optional[str] = None,
+        check_accessibility: bool = True,
+        check_keywords: bool = True,
+        __event_emitter__: Callable[[dict], Any] = None,
+    ) -> List[str]:
+        """
+        Centralized URL validation pipeline used by both regular crawl
+        and research crawl strategies. Avoids duplicating the same
+        _is_valid_crawl_url / _is_accessible_html / _has_keywords
+        call sequence in multiple places.
+        """
+        original_count = len(urls)
+
+        # Stage 1: Filter invalid URLs
+        urls = [url for url in urls if self._is_valid_crawl_url(url)]
+        if self.valves.DEBUG and original_count != len(urls):
+            logger.info(
+                f"Validation stage 1: filtered out "
+                f"{original_count - len(urls)} invalid URLs"
+            )
+
+        if not urls:
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                if self.valves.DEBUG:
+                    logger.debug("No valid URLs to crawl after filtering")
+            return []
+
+        # Stage 2: Check HTML accessibility
+        if check_accessibility:
+            if self.valves.DEBUG:
+                logger.info(
+                    f"Validation stage 2: checking accessibility for "
+                    f"{len(urls)} URLs..."
+                )
+            tasks = [self._is_accessible_html(url) for url in urls]
+            results = await asyncio.gather(*tasks)
+            urls = [url for url, ok in zip(urls, results) if ok]
+            if self.valves.DEBUG:
+                logger.info(f"Validation stage 2: {len(urls)} accessible HTML URLs")
+
+        if not urls:
+            return []
+
+        # Stage 3: Check keywords in content
+        if check_keywords and query:
+            preflight_keywords = [
+                re.sub(r"[^\w]", "", kw).lower()
+                for kw in query.split()
+                if re.sub(r"[^\w]", "", kw)
+            ]
+            if preflight_keywords:
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"Validation stage 3: checking keywords for "
+                        f"{len(urls)} URLs..."
+                    )
+                tasks = [self._has_keywords(url, preflight_keywords) for url in urls]
+                results = await asyncio.gather(*tasks)
+                urls = [url for url, ok in zip(urls, results) if ok]
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"Validation stage 3: {len(urls)} URLs after keyword check"
+                    )
+
+        return urls
+
+    # endregion
+
     # region ── LLM Query Expansion & URL Filter ───────────────────────────────
 
     async def _expand_query_with_llm(
         self,
         query: str,
         __event_emitter__: Callable[[dict], Any] = None,
+        model: Optional[str] = None,
     ) -> List[str]:
-        """Generate related search terms using LLM."""
+        """Generate related search terms using LLM.
+        Uses active user model when provided; falls back to valve configuration.
+        """
         if not self.valves.USE_QUERY_EXPANSION:
             return [query]
 
@@ -1084,18 +1160,6 @@ class Tools:
                     },
                 }
             )
-
-        llm_config = LLMConfig(
-            provider=self.valves.LLM_PROVIDER,
-            base_url=self.valves.LLM_BASE_URL.rstrip("/"),
-            temperature=0.3,
-            max_tokens=500,
-        )
-        llm_config.api_token = (
-            self.valves.LLM_API_TOKEN
-            if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
-            else None
-        )
 
         prompt = f"""You are a search query expansion expert. Given a user's search query, generate {self.valves.MAX_EXPANDED_QUERIES} related search terms that would likely find relevant information on the same topic.
 
@@ -1114,88 +1178,244 @@ Respond with ONLY a JSON list of strings, like this example:
 Do not include any other text in your response, only the JSON list."""
 
         try:
-            headers = {"Content-Type": "application/json"}
-            if llm_config.api_token:
-                headers["Authorization"] = f"Bearer {llm_config.api_token}"
+            if model:
+                base_url = self.valves.LLM_BASE_URL.rstrip("/")
+                is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
 
-            model = llm_config.provider
-            if "/" in model:
-                model = model.split("/", 1)[1]
+                if is_ollama:
+                    ollama_url = f"{base_url}/api/generate"
+                    payload = {
+                        "model": model,
+                        "prompt": prompt,
+                        "system": "You are a precise search query expander. Respond only with the requested JSON list.",
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.3,
+                            "num_predict": 500,
+                        },
+                    }
+                    response = requests.post(ollama_url, json=payload, timeout=30)
 
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a precise search query expander. Respond only with the requested JSON list.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": llm_config.temperature,
-                "max_tokens": llm_config.max_tokens,
-            }
-
-            response = requests.post(
-                f"{llm_config.base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=30,
-            )
-
-            if response.status_code == 200:
-                result = response.json()
-                content = (
-                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                )
-
-                import json
-
-                json_match = re.search(r"\[.*\]", content, re.DOTALL)
-                if json_match:
-                    related_queries = json.loads(json_match.group())
-                    if isinstance(related_queries, list):
-                        related_queries = [
-                            str(q).strip()
-                            for q in related_queries
-                            if q and str(q).strip()
-                        ]
-                        all_queries = [query]
-                        for q in related_queries[: self.valves.MAX_EXPANDED_QUERIES]:
-                            if (
-                                q
-                                and q.lower() != query.lower()
-                                and q not in all_queries
-                            ):
-                                all_queries.append(q)
-
-                        if self.valves.DEBUG:
-                            logger.info(f"Query expansion: {query} -> {all_queries}")
-
-                        if __event_emitter__ and self.valves.MORE_STATUS:
-                            queries_display = "\n".join(
-                                [f"  • {q}" for q in all_queries[1:]]
-                            )
-                            if len(all_queries) > 1:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"🔍 Expanded search terms:\n{queries_display}",
-                                            "done": False,
-                                        },
-                                    }
-                                )
+                    if response.status_code != 200:
+                        logger.error(
+                            f"Ollama expansion error {response.status_code}: {response.text[:200]}"
+                        )
+                        if __event_emitter__:
                             await __event_emitter__(
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": f"Will search using {len(all_queries)} terms (including original)",
+                                        "description": "⚠️ Query expansion failed. Using original query.",
                                         "done": False,
                                     },
                                 }
                             )
+                        return [query]
 
-                        return all_queries
+                    result = response.json()
+                    content = result.get("response", "")
+                else:
+                    headers = {"Content-Type": "application/json"}
+                    api_token = (
+                        self.valves.LLM_API_TOKEN.strip()
+                        if self.valves.LLM_API_TOKEN
+                        and self.valves.LLM_API_TOKEN.strip()
+                        else None
+                    )
+                    if api_token:
+                        headers["Authorization"] = f"Bearer {api_token}"
+
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a precise search query expander. Respond only with the requested JSON list.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 500,
+                    }
+
+                    response = requests.post(
+                        f"{base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=30,
+                    )
+
+                    if response.status_code != 200:
+                        logger.error(
+                            f"Expansion error {response.status_code}: {response.text[:200]}"
+                        )
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": "⚠️ Query expansion failed. Using original query.",
+                                        "done": False,
+                                    },
+                                }
+                            )
+                        return [query]
+
+                    result = response.json()
+                    content = (
+                        result.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+            else:
+                base_url = self.valves.LLM_BASE_URL.rstrip("/")
+                provider = self.valves.LLM_PROVIDER
+                api_token = (
+                    self.valves.LLM_API_TOKEN.strip()
+                    if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
+                    else None
+                )
+
+                valve_model = provider
+                if "/" in valve_model:
+                    valve_model = valve_model.split("/", 1)[1]
+
+                is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
+
+                if is_ollama:
+                    ollama_url = f"{base_url}/api/generate"
+                    payload = {
+                        "model": valve_model,
+                        "prompt": prompt,
+                        "system": "You are a precise search query expander. Respond only with the requested JSON list.",
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.3,
+                            "num_predict": 500,
+                        },
+                    }
+                    response = requests.post(ollama_url, json=payload, timeout=30)
+
+                    if response.status_code != 200:
+                        logger.error(
+                            f"Ollama expansion error {response.status_code}: {response.text[:200]}"
+                        )
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": "⚠️ Query expansion failed. Using original query.",
+                                        "done": False,
+                                    },
+                                }
+                            )
+                        return [query]
+
+                    result = response.json()
+                    content = result.get("response", "")
+                else:
+                    headers = {"Content-Type": "application/json"}
+                    if api_token:
+                        headers["Authorization"] = f"Bearer {api_token}"
+
+                    payload = {
+                        "model": valve_model,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": "You are a precise search query expander. Respond only with the requested JSON list.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 500,
+                    }
+
+                    response = requests.post(
+                        f"{base_url}/chat/completions",
+                        json=payload,
+                        headers=headers,
+                        timeout=30,
+                    )
+
+                    if response.status_code != 200:
+                        logger.error(
+                            f"Expansion error {response.status_code}: {response.text[:200]}"
+                        )
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": "⚠️ Query expansion failed. Using original query.",
+                                        "done": False,
+                                    },
+                                }
+                            )
+                        return [query]
+
+                    result = response.json()
+                    content = (
+                        result.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                    )
+
+            import json
+
+            json_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if json_match:
+                related_queries = json.loads(json_match.group())
+                if isinstance(related_queries, list):
+                    related_queries = [
+                        str(q).strip() for q in related_queries if q and str(q).strip()
+                    ]
+                    all_queries = [query]
+                    for q in related_queries[: self.valves.MAX_EXPANDED_QUERIES]:
+                        if q and q.lower() != query.lower() and q not in all_queries:
+                            all_queries.append(q)
+
+                    if self.valves.DEBUG:
+                        logger.info(f"Query expansion: {query} -> {all_queries}")
+
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        queries_display = "\n".join(
+                            [f"  • {q}" for q in all_queries[1:]]
+                        )
+                        if len(all_queries) > 1:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"🔍 Expanded search terms:\n{queries_display}",
+                                        "done": False,
+                                    },
+                                }
+                            )
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Will search using {len(all_queries)} terms (including original)",
+                                    "done": False,
+                                },
+                            }
+                        )
+
+                    return all_queries
+
+            logger.warning("Query expansion: LLM response did not contain valid JSON")
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "⚠️ Could not parse expanded queries. Using original query.",
+                            "done": False,
+                        },
+                    }
+                )
 
         except Exception as e:
             logger.error(f"Query expansion error: {e}")
@@ -1204,7 +1424,7 @@ Do not include any other text in your response, only the JSON list."""
                     {
                         "type": "status",
                         "data": {
-                            "description": f"Query expansion failed, using original query.",
+                            "description": "Query expansion failed, using original query.",
                             "done": False,
                         },
                     }
@@ -1221,36 +1441,43 @@ Do not include any other text in your response, only the JSON list."""
         """Perform searches for multiple queries and aggregate unique URLs."""
         all_urls = []
 
-        if __event_emitter__ and self.valves.MORE_STATUS and len(queries) > 1:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"📡 Searching {len(queries)} different terms...",
-                        "done": False,
-                    },
-                }
-            )
-
-        for idx, query in enumerate(queries, 1):
-            if __event_emitter__ and self.valves.MORE_STATUS and len(queries) > 1:
-                is_original = idx == 1
-                prefix = "🎯" if is_original else "🔄"
+        # Unified search start message
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            engine_names = []
+            if self.valves.USE_NATIVE_SEARCH:
+                engine_names.append("Native")
+            if self.valves.SEARCH_WITH_SEARXNG:
+                engine_names.append("SearXNG")
+            engines_str = " & ".join(engine_names)
+            if len(queries) > 1:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f'{prefix} Searching ({idx}/{len(queries)}): "{query}"',
+                            "description": f"📡 Searching {len(queries)} terms with {engines_str}...",
                             "done": False,
                         },
                     }
                 )
-            elif __event_emitter__ and self.valves.MORE_STATUS:
+            else:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f'Searching: "{query}"',
+                            "description": f"📡 Searching with {engines_str}...",
+                            "done": False,
+                        },
+                    }
+                )
+
+        for idx, query in enumerate(queries, 1):
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                icon = "🎯" if idx == 1 else "🔄"
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f'{icon} Searching ({idx}/{len(queries)}): "{query}"',
                             "done": False,
                         },
                     }
@@ -1272,12 +1499,12 @@ Do not include any other text in your response, only the JSON list."""
                 )
                 query_urls.extend(searxng_urls[:max_results])
 
-            if __event_emitter__ and self.valves.MORE_STATUS and len(queries) > 1:
+            if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f"  → Found {len(query_urls)} URLs from this term",
+                            "description": f"  → Found {len(query_urls)} URLs",
                             "done": False,
                         },
                     }
@@ -1388,7 +1615,7 @@ Do not include any other text in your response, only the JSON list."""
         if top_count == 0:
             return
 
-        ranking_summary = "📊 **Ranking URLs por relevancia:**\n\n"
+        ranking_summary = "📊 Ranking URLs by relevance:\n\n"
         for i in range(top_count):
             url = urls[i]
             score = scores[i] if i < len(scores) else 0
@@ -1406,12 +1633,10 @@ Do not include any other text in your response, only the JSON list."""
             else:
                 indicator = "➖"
 
-            ranking_summary += (
-                f"{indicator} **{i+1}.** `{domain}` - Score: {score:.1f}\n"
-            )
+            ranking_summary += f"{indicator} {i+1}. `{domain}` - Score: {score:.1f}\n"
             ranking_summary += f"   📄 {path if path else '/'}\n\n"
 
-        ranking_summary += f"📈 Analizadas {len(urls)} URLs, seleccionadas las {min(self.valves.CRAWL4AI_MAX_URLS, len(urls))} más relevantes."
+        ranking_summary += f"📈 Analyzed {len(urls)} URLs, selected the {min(self.valves.CRAWL4AI_MAX_URLS, len(urls))} most relevant."
 
         await __event_emitter__(
             {
@@ -1429,8 +1654,11 @@ Do not include any other text in your response, only the JSON list."""
         urls: List[str],
         query: str,
         __event_emitter__: Callable[[dict], Any] = None,
+        model: Optional[str] = None,
     ) -> List[str]:
-        """Filter URLs using LLM for semantic relevance."""
+        """Filter URLs using LLM for semantic relevance.
+        Uses active user model when provided; falls back to valve configuration.
+        """
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
 
@@ -1474,17 +1702,21 @@ Do not include any other text in your response, only the JSON list."""
         for url, title in results:
             url_titles[url] = title
 
-        llm_config = LLMConfig(
-            provider=self.valves.LLM_PROVIDER,
-            base_url=self.valves.LLM_BASE_URL.rstrip("/"),
-            temperature=0.1,
-            max_tokens=500,
-        )
-        llm_config.api_token = (
-            self.valves.LLM_API_TOKEN
+        # Use active model if provided, otherwise fall back to valve config
+        base_url = self.valves.LLM_BASE_URL.rstrip("/")
+        api_token = (
+            self.valves.LLM_API_TOKEN.strip()
             if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
             else None
         )
+        is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
+
+        if model and is_ollama:
+            used_model = model
+        else:
+            used_model = self.valves.LLM_PROVIDER
+            if "/" in used_model:
+                used_model = used_model.split("/", 1)[1]
 
         prompt = f"""You are a web search relevance filter. Your task is to analyze each URL and its title, then decide if the page is LIKELY to contain information relevant to the search query.
 
@@ -1500,69 +1732,109 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
         prompt += '\nRespond with a JSON list in format: [{"index": 1, "decision": "KEEP"}, ...]'
 
         try:
-            headers = {"Content-Type": "application/json"}
-            if llm_config.api_token:
-                headers["Authorization"] = f"Bearer {llm_config.api_token}"
-
-            model = llm_config.provider
-            if "/" in model:
-                model = model.split("/", 1)[1]
-
-            payload = {
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a precise URL relevance filter. Respond only with the requested JSON format.",
+            if is_ollama:
+                ollama_url = f"{base_url}/api/generate"
+                payload = {
+                    "model": used_model,
+                    "prompt": prompt,
+                    "system": "You are a precise URL relevance filter. Respond only with the requested JSON format.",
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.1,
+                        "num_predict": 500,
                     },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": llm_config.temperature,
-                "max_tokens": llm_config.max_tokens,
-            }
+                }
+                response = requests.post(ollama_url, json=payload, timeout=30)
 
-            response = requests.post(
-                f"{llm_config.base_url}/chat/completions",
-                json=payload,
-                headers=headers,
-                timeout=30,
-            )
+                if response.status_code != 200:
+                    logger.error(f"LLM URL filter Ollama error: {response.status_code}")
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": "LLM filter failed, continuing with all URLs.",
+                                    "done": False,
+                                },
+                            }
+                        )
+                    return urls
 
-            if response.status_code == 200:
+                result = response.json()
+                content = result.get("response", "")
+            else:
+                headers = {"Content-Type": "application/json"}
+                if api_token:
+                    headers["Authorization"] = f"Bearer {api_token}"
+
+                payload = {
+                    "model": used_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a precise URL relevance filter. Respond only with the requested JSON format.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.1,
+                    "max_tokens": 500,
+                }
+
+                response = requests.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=30,
+                )
+
+                if response.status_code != 200:
+                    logger.error(f"LLM URL filter error: {response.status_code}")
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": "LLM filter failed, continuing with all URLs.",
+                                    "done": False,
+                                },
+                            }
+                        )
+                    return urls
+
                 result = response.json()
                 content = (
                     result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 )
 
-                import json
+            import json
 
-                json_match = re.search(r"\[.*\]", content, re.DOTALL)
-                if json_match:
-                    decisions = json.loads(json_match.group())
-                    keep_indices = {
-                        item["index"] - 1
-                        for item in decisions
-                        if item.get("decision") == "KEEP"
-                    }
-                    filtered_urls = [urls[i] for i in keep_indices if i < len(urls)]
+            json_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if json_match:
+                decisions = json.loads(json_match.group())
+                keep_indices = {
+                    item["index"] - 1
+                    for item in decisions
+                    if item.get("decision") == "KEEP"
+                }
+                filtered_urls = [urls[i] for i in keep_indices if i < len(urls)]
 
-                    if self.valves.DEBUG:
-                        logger.info(
-                            f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
-                        )
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
+                    )
 
-                    if __event_emitter__ and self.valves.MORE_STATUS:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {len(urls) - len(filtered_urls)}.",
-                                    "done": False,
-                                },
-                            }
-                        )
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {len(urls) - len(filtered_urls)}.",
+                                "done": False,
+                            },
+                        }
+                    )
 
-                    return filtered_urls
+                return filtered_urls
 
         except Exception as e:
             logger.error(f"LLM URL filter error: {e}")
@@ -1571,7 +1843,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                     {
                         "type": "status",
                         "data": {
-                            "description": f"LLM filter failed, continuing with all URLs.",
+                            "description": "LLM filter failed, continuing with all URLs.",
                             "done": False,
                         },
                     }
@@ -1691,17 +1963,6 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
         if self.valves.SEARXNG_API_TOKEN:
             headers["Authorization"] = f"Bearer {self.valves.SEARXNG_API_TOKEN}"
 
-        if __event_emitter__ and self.valves.MORE_STATUS:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": "🔎 Buscando en SearXNG...",
-                        "done": False,
-                    },
-                }
-            )
-
         try:
             if self.valves.SEARXNG_METHOD == "POST":
                 response = requests.post(
@@ -1727,17 +1988,6 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
             if self.valves.DEBUG:
                 logger.info(f"SearXNG search for '{query}' returned {len(urls)} URLs")
 
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"📋 Encontrados {len(urls)} resultados en SearXNG",
-                            "done": False,
-                        },
-                    }
-                )
-
             return urls
 
         except requests.exceptions.RequestException as e:
@@ -1747,7 +1997,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                     {
                         "type": "status",
                         "data": {
-                            "description": f"⚠️ Error en búsqueda SearXNG: {str(e)[:100]}",
+                            "description": f"⚠️ Error in SearXNG search: {str(e)[:100]}",
                             "done": False,
                         },
                     }
@@ -1816,7 +2066,18 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                 }
             )
 
-        search_queries = await self._expand_query_with_llm(query, __event_emitter__)
+        active_model = None
+        if __user__:
+            try:
+                user = Users.get_user_by_id(__user__["id"])
+                if user and hasattr(user, "settings") and user.settings:
+                    active_model = user.settings.get("model")
+            except Exception as e:
+                logger.warning(f"Could not obtain user model: {e}")
+
+        search_queries = await self._expand_query_with_llm(
+            query, __event_emitter__, model=active_model
+        )
         search_urls = await self._search_all_queries(
             search_queries, __event_emitter__, __user__
         )
@@ -1847,7 +2108,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                     {
                         "type": "status",
                         "data": {
-                            "description": f"🧠 **Filtrado semántico con IA**\nAnalizando {len(gathered_urls)} URLs...",
+                            "description": f"🧠 AI Semantic Filtering\nAnalyzing {len(gathered_urls)} URLs...",
                             "done": False,
                         },
                     }
@@ -1856,7 +2117,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
 
             before_filter_count = len(gathered_urls)
             gathered_urls = await self._filter_urls_with_llm(
-                gathered_urls, query, __event_emitter__
+                gathered_urls, query, __event_emitter__, model=active_model
             )
 
             if __event_emitter__ and self.valves.MORE_STATUS:
@@ -1866,7 +2127,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                         {
                             "type": "status",
                             "data": {
-                                "description": f"✅ Filtro IA: eliminadas {removed_count} URL{'s' if removed_count != 1 else ''} irrelevantes. {len(gathered_urls)} permanecen.",
+                                "description": f"✅ AI filter: removed {removed_count} irrelevant URL{'s' if removed_count != 1 else ''}. {len(gathered_urls)} remain.",
                                 "done": False,
                             },
                         }
@@ -1876,7 +2137,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                         {
                             "type": "status",
                             "data": {
-                                "description": f"✅ Filtro IA: todas las URLs parecen relevantes.",
+                                "description": "✅ AI filter: all URLs appear relevant.",
                                 "done": False,
                             },
                         }
@@ -1889,7 +2150,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                         {
                             "type": "status",
                             "data": {
-                                "description": f"❌ El filtro IA eliminó todas las URLs.",
+                                "description": "❌ AI filter removed all URLs.",
                                 "done": True,
                             },
                         }
@@ -1908,7 +2169,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                     {
                         "type": "status",
                         "data": {
-                            "description": "🎯 **Evaluando relevancia de los resultados...**\nAnalizando cada URL según:\n• Coincidencia con la búsqueda\n• Calidad del dominio\n• Patrones de contenido relevante",
+                            "description": "🎯 Evaluating result relevance...\nAnalyzing each URL by:\n• Search match\n• Domain quality\n• Relevant content patterns",
                             "done": False,
                         },
                     }
@@ -1939,7 +2200,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                     {
                         "type": "status",
                         "data": {
-                            "description": f"✂️ Limitando a {max_urls} URLs (de {len(gathered_urls)} totales)",
+                            "description": f"✂️ Limiting to {max_urls} most relevant URLs (from {len(gathered_urls)} total, using LLM scoring)",
                             "done": False,
                         },
                     }
@@ -1989,7 +2250,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                 {
                     "type": "status",
                     "data": {
-                        "description": f"🔍 Procesando {len(gathered_urls)} resultados más relevantes...",
+                        "description": f"🔍 Processing {len(gathered_urls)} most relevant results...",
                         "done": False,
                     },
                 }
@@ -2030,6 +2291,12 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
         else:
             for i in range(0, len(gathered_urls), self.valves.CRAWL4AI_BATCH):
                 batch = gathered_urls[i : i + self.valves.CRAWL4AI_BATCH]
+                # Validate batch URLs before crawling (non-research mode)
+                batch = await self._validate_url_pipeline(
+                    batch, query, __event_emitter__=__event_emitter__
+                )
+                if not batch:
+                    continue
                 try:
                     crawled_batch = await self._crawl_url(
                         urls=batch, query=query, __event_emitter__=__event_emitter__
@@ -2190,46 +2457,12 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
             for url in urls
         ]
 
-        # Filter invalid URLs before any processing
-        original_count = len(urls)
-        urls = [url for url in urls if self._is_valid_crawl_url(url)]
-        if self.valves.DEBUG and original_count != len(urls):
-            logger.info(f"Filtered out {original_count - len(urls)} invalid URLs")
+        urls = await self._validate_url_pipeline(
+            urls, query, __event_emitter__=__event_emitter__
+        )
 
         if not urls:
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                # Silent in UI, only log debug
-                if self.valves.DEBUG:
-                    logger.debug("No valid URLs to crawl after filtering")
             return {"content": [], "images": [], "videos": [], "links": []}
-
-        if self.valves.DEBUG:
-            logger.info(f"Checking accessibility for {len(urls)} URLs...")
-        tasks = [self._is_accessible_html(url) for url in urls]
-        results = await asyncio.gather(*tasks)
-        accessible_urls = [url for url, ok in zip(urls, results) if ok]
-        if self.valves.DEBUG:
-            logger.info(f"Accessible HTML URLs: {len(accessible_urls)}/{len(urls)}")
-
-        if not accessible_urls:
-            return {"content": [], "images": [], "videos": [], "links": []}
-
-        urls = accessible_urls
-
-        if query:
-            preflight_keywords = [
-                re.sub(r"[^\w]", "", kw).lower()
-                for kw in query.split()
-                if re.sub(r"[^\w]", "", kw)
-            ]
-            if preflight_keywords:
-                tasks = [self._has_keywords(url, preflight_keywords) for url in urls]
-                results = await asyncio.gather(*tasks)
-                urls = [url for url, ok in zip(urls, results) if ok]
-                if self.valves.DEBUG:
-                    logger.info(f"URLs after keyword preflight: {len(urls)}")
-                if not urls:
-                    return {"content": [], "images": [], "videos": [], "links": []}
 
         base_url = self.valves.CRAWL4AI_BASE_URL.rstrip("/")
         endpoint = f"{base_url}/crawl"
@@ -2611,6 +2844,16 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                 if url in crawled_pages:
                     continue
 
+                # Validate URL before crawling
+                validated = await self._validate_url_pipeline(
+                    [url],
+                    query,
+                    check_keywords=False,
+                    __event_emitter__=__event_emitter__,
+                )
+                if not validated:
+                    continue
+
                 crawled_pages.add(url)
 
                 if __event_emitter__ and self.valves.MORE_STATUS:
@@ -2740,17 +2983,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
         all_videos = []
         total_tokens = 0
 
-        llm_config = LLMConfig(
-            provider=self.valves.LLM_PROVIDER,
-            base_url=self.valves.LLM_BASE_URL.rstrip("/"),
-            temperature=0.3,
-            max_tokens=500,
-        )
-        llm_config.api_token = (
-            self.valves.LLM_API_TOKEN if self.valves.LLM_API_TOKEN else None
-        )
-
-        urls_to_process = list(start_urls[:5])
+        urls_to_process = list(start_urls)
 
         while (
             urls_to_process
@@ -2760,6 +2993,16 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
             current_url = urls_to_process.pop(0)
 
             if current_url in crawled_pages:
+                continue
+
+            # Validate URL before crawling
+            validated = await self._validate_url_pipeline(
+                [current_url],
+                query,
+                check_keywords=False,
+                __event_emitter__=__event_emitter__,
+            )
+            if not validated:
                 continue
 
             crawled_pages.add(current_url)
@@ -2925,6 +3168,16 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                 ):
                     continue
 
+                # Validate URL before crawling
+                validated = await self._validate_url_pipeline(
+                    [url],
+                    query,
+                    check_keywords=False,
+                    __event_emitter__=__event_emitter__,
+                )
+                if not validated:
+                    continue
+
                 crawled_pages.add(url)
 
                 if __event_emitter__ and self.valves.MORE_STATUS:
@@ -3061,6 +3314,16 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
             if results["total_pages"] >= max_pages:
                 break
 
+            # Validate source URL before crawling
+            validated = await self._validate_url_pipeline(
+                [source_url],
+                query,
+                check_keywords=False,
+                __event_emitter__=__event_emitter__,
+            )
+            if not validated:
+                continue
+
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
@@ -3164,6 +3427,16 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                         and parsed_link.netloc != parsed_source.netloc
                     ):
                         continue
+
+                # Validate link before crawling
+                validated_link = await self._validate_url_pipeline(
+                    [link],
+                    query,
+                    check_keywords=False,
+                    __event_emitter__=__event_emitter__,
+                )
+                if not validated_link:
+                    continue
 
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
