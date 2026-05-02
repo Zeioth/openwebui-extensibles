@@ -1167,11 +1167,12 @@ class Tools:
 Original query: "{query}"
 
 Guidelines:
-- Include synonyms and related concepts
-- Consider different phrasings
-- Include specific subtopics when relevant
-- Keep terms concise (under 10 words each)
-- Avoid overly broad or generic terms
+- Every generated term MUST contain the core subject of the original query (for example, if the query is about a specific fruit, include the fruit's name in every term).
+- Include synonyms, scientific names, and alternative phrasings of the subject.
+- Include specific subtopics when relevant (e.g., cultivation, taxonomy, varieties) but always keep the subject present.
+- Keep terms concise (under 10 words each).
+- Never generate a term that consists only of a generic category name (like "fruit", "fruta", "food", "plant", etc.) without the specific subject.
+- Do not generate terms that are broader than the query (e.g., if the query is about strawberries, do not generate "fruit classification" or "fruta wikipedia").
 
 Respond with ONLY a JSON list of strings, like this example:
 ["python web scraping tutorial", "beautifulsoup guide", "extract data from websites"]
@@ -1191,8 +1192,8 @@ Do not include any other text in your response, only the JSON list."""
                         "system": "You are a precise search query expander. Respond only with the requested JSON list.",
                         "stream": False,
                         "options": {
-                            "temperature": 0.3,
-                            "num_predict": 500,
+                            "temperature": 0.0,
+                            "num_predict": 700,
                         },
                     }
                     response = requests.post(ollama_url, json=payload, timeout=30)
@@ -1235,8 +1236,8 @@ Do not include any other text in your response, only the JSON list."""
                             },
                             {"role": "user", "content": prompt},
                         ],
-                        "temperature": 0.3,
-                        "max_tokens": 500,
+                        "temperature": 0.0,
+                        "max_tokens": 700,
                     }
 
                     response = requests.post(
@@ -1712,32 +1713,35 @@ Do not include any other text in your response, only the JSON list."""
         )
         is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
 
-        if model and is_ollama:
+        if model:
             used_model = model
         else:
             used_model = self.valves.LLM_PROVIDER
             if "/" in used_model:
                 used_model = used_model.split("/", 1)[1]
 
-        prompt = f"""You are a strict search relevance filter. Your only task is to decide if each URL is DIRECTLY about the topic the user asked for.
+        prompt = f"""You are a strict relevance filter. Your job: for each URL, decide "KEEP" or "REJECT" based on whether the page is DIRECTLY about the user's query.
 
-Search Query: "{query}"
+User query: "{query}"
 
-Rules:
-- KEEP only URLs that specifically address the core subject of the query
-- REJECT pages about related but DIFFERENT topics (e.g., if the query is about strawberries, reject pages about blackberries, raspberries, or general fruit classifications unless strawberries are the main focus)
-- REJECT generic Wikipedia category pages, disambiguation pages, or list-of-articles pages that merely mention the topic
-- The page title should clearly reflect the query subject; synonyms and scientific names are acceptable
+**Rules**
+1. KEEP a URL only if the page title indicates the page's main topic is the specific subject of the query (synonyms and scientific names are fine).
+2. REJECT if the page is about a broader category, a different topic that only sounds similar, or a disambiguation page.
+3. REJECT if the page title contains the query word only as part of a larger, unrelated word.
+4. REJECT Wikipedia category, portal, file, "List of ...", or "Template:" pages.
+5. If you are unsure, REJECT.
 
-BEFORE answering, ask yourself: Is this page primarily about the exact topic the user asked for?
+**Before deciding, briefly ask yourself:** What is the main subject of this page? Does it exactly match the core topic of the query?
 
-For each URL below, respond with only "KEEP" if it is DIRECTLY relevant, or "REJECT" if it is not.
+**Output**
+Return ONLY a JSON list. No other text.
+Example: [{{"index":1,"decision":"KEEP"}}, {{"index":2,"decision":"REJECT"}}, ...]
+
+URLs:
 """
         for idx, url in enumerate(urls, 1):
             title = url_titles.get(url, "No title available")
-            prompt += f"{idx}. URL: {url}\n   Title: {title}\n"
-
-        prompt += '\nRespond with a JSON list in format: [{"index": 1, "decision": "KEEP"}, ...]'
+            prompt += f"""{idx}. URL: {url}\n   Title: {title}\n"""
 
         try:
             if is_ollama:
@@ -1784,7 +1788,7 @@ For each URL below, respond with only "KEEP" if it is DIRECTLY relevant, or "REJ
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": 0.1,
+                    "temperature": 0.2,
                     "max_tokens": 500,
                 }
 
