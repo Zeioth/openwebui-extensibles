@@ -1162,22 +1162,29 @@ class Tools:
                 }
             )
 
-        prompt = f"""You are a search query expansion expert. Given a user's search query, generate {self.valves.MAX_EXPANDED_QUERIES} related search terms that would likely find relevant information on the same topic.
-
-Original query: "{query}"
-
-Guidelines:
-- Every generated term MUST contain the core subject of the original query (for example, if the query is about a specific fruit, include the fruit's name in every term).
-- Include synonyms, scientific names, and alternative phrasings of the subject.
-- Include specific subtopics when relevant (e.g., cultivation, taxonomy, varieties) but always keep the subject present.
-- Keep terms concise (under 10 words each).
-- Never generate a term that consists only of a generic category name (like "fruit", "fruta", "food", "plant", etc.) without the specific subject.
-- Do not generate terms that are broader than the query (e.g., if the query is about strawberries, do not generate "fruit classification" or "fruta wikipedia").
-
-Respond with ONLY a JSON list of strings, like this example:
-["python web scraping tutorial", "beautifulsoup guide", "extract data from websites"]
-
-Do not include any other text in your response, only the JSON list."""
+        prompt = f"""You are a search query expansion expert. Your goal is to find MORE results about the SAME concept, not broader or related concepts.
+        
+        Original query: "{query}"
+        
+        **Step 1 — Identify the core concept:**
+        Before generating any terms, explicitly state:
+        - What is the EXACT meaning of the key subject in this query? (not a category, the specific thing)
+        - Are there homonyms or other meanings for this word that must be AVOIDED?
+        
+        **Step 2 — Generate {self.valves.MAX_EXPANDED_QUERIES} search terms following these rules:**
+        - Every term MUST be about the identical concept identified in Step 1
+        - Include: synonyms, scientific names, alternative phrasings, specific subtopics
+        - Each term must contain enough context words to disambiguate from homonyms
+          (e.g., if the subject has multiple meanings, add a disambiguating word)
+        - Keep terms under 10 words each
+        - NEVER generate terms that are a broader category (e.g., "fruit" alone)
+        - NEVER generate terms about a different meaning of the same word
+        
+        **Output format:**
+        First output your Step 1 analysis as a comment, then output ONLY a JSON list:
+        // Core concept: [your analysis here]
+        // Homonyms to avoid: [list them]
+        ["term 1", "term 2", ...]"""
 
         try:
             if model:
@@ -1720,22 +1727,21 @@ Do not include any other text in your response, only the JSON list."""
             if "/" in used_model:
                 used_model = used_model.split("/", 1)[1]
 
-        prompt = f"""You are a strict relevance filter. Your job: for each URL, decide "KEEP" or "REJECT" based on whether the page is DIRECTLY about the user's query.
+        prompt = f"""Task: For each URL, output "KEEP" or "REJECT".
 
-User query: "{query}"
+Query: "{query}"
 
-**Rules**
-1. KEEP a URL only if the page title indicates the page's main topic is the specific subject of the query (synonyms and scientific names are fine).
-2. REJECT if the page is about a broader category, a different topic that only sounds similar, or a disambiguation page.
-3. REJECT if the page title contains the query word only as part of a larger, unrelated word.
-4. REJECT Wikipedia category, portal, file, "List of ...", or "Template:" pages.
-5. If you are unsure, REJECT.
+DECISION RULES (apply in order):
+1. REJECT if the page is a disambiguation page (title contains "desambiguación" or "disambiguation").
+2. REJECT if the page is a category, portal, template, or "List of..." page.
+3. REJECT if the page is about a DIFFERENT fruit/plant/object than the query.
+4. KEEP only if the page is specifically about the query's subject.
 
-**Before deciding, briefly ask yourself:** What is the main subject of this page? Does it exactly match the core topic of the query?
+EXAMPLES of what "different subject" means:
+- Query about "fresa" (strawberry fruit) → REJECT "Mora" (blackberry), "Fresadora" (milling machine), "Fresa (Argot)" (slang)
+- Query about "manzana" (apple fruit) → REJECT "Manzana (desambiguación)", "Manzanilla" (chamomile)
 
-**Output**
-Return ONLY a JSON list. No other text.
-Example: [{{"index":1,"decision":"KEEP"}}, {{"index":2,"decision":"REJECT"}}, ...]
+OUTPUT: JSON list ONLY. Example: [{{"index":1,"decision":"KEEP"}}, {{"index":2,"decision":"REJECT"}}]
 
 URLs:
 """
