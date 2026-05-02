@@ -454,6 +454,7 @@ class Tools:
         self.crawl_counter = 0
         self.content_counter = 0
         self.total_urls = 0
+        self._detected_homonyms: List[str] = []
 
     def _configure(self):
         """Validates valve configuration and logs warnings for common issues.
@@ -1114,23 +1115,77 @@ class Tools:
 
         # Stage 3: Check keywords in content
         if check_keywords and query:
-            preflight_keywords = [
+            # Strip stopwords and short words to get meaningful anchor terms
+            stopwords = {
+                "de",
+                "la",
+                "el",
+                "los",
+                "las",
+                "del",
+                "en",
+                "y",
+                "o",
+                "un",
+                "una",
+                "the",
+                "of",
+                "and",
+                "or",
+                "a",
+                "an",
+                "is",
+                "que",
+                "se",
+                "su",
+                "con",
+                "por",
+                "para",
+                "al",
+                "lo",
+            }
+            raw_keywords = [
                 re.sub(r"[^\w]", "", kw).lower()
                 for kw in query.split()
                 if re.sub(r"[^\w]", "", kw)
             ]
+            preflight_keywords = [
+                kw for kw in raw_keywords if len(kw) > 3 and kw not in stopwords
+            ]
+
+            # Anchor words: the longest terms are the most semantically specific
+            anchor_keywords = sorted(preflight_keywords, key=len, reverse=True)[:2]
+
             if preflight_keywords:
                 if self.valves.DEBUG:
                     logger.info(
-                        f"Validation stage 3: checking keywords for "
-                        f"{len(urls)} URLs..."
+                        f"Validation stage 3: checking keywords {preflight_keywords} "
+                        f"(anchors: {anchor_keywords}) for {len(urls)} URLs..."
                     )
+
+                # General keyword check
                 tasks = [self._has_keywords(url, preflight_keywords) for url in urls]
-                results = await asyncio.gather(*tasks)
-                urls = [url for url, ok in zip(urls, results) if ok]
+                general_results = await asyncio.gather(*tasks)
+
+                # Anchor keyword check (stricter: must contain the core subject)
+                if anchor_keywords:
+                    anchor_tasks = [
+                        self._has_keywords(url, anchor_keywords) for url in urls
+                    ]
+                    anchor_results = await asyncio.gather(*anchor_tasks)
+                    urls = [
+                        url
+                        for url, general_ok, anchor_ok in zip(
+                            urls, general_results, anchor_results
+                        )
+                        if general_ok and anchor_ok
+                    ]
+                else:
+                    urls = [url for url, ok in zip(urls, general_results) if ok]
+
                 if self.valves.DEBUG:
                     logger.info(
-                        f"Validation stage 3: {len(urls)} URLs after keyword check"
+                        f"Validation stage 3: {len(urls)} URLs after keyword+anchor check"
                     )
 
         return urls
@@ -1147,6 +1202,7 @@ class Tools:
     ) -> List[str]:
         """Generate related search terms using LLM.
         Uses active user model when provided; falls back to valve configuration.
+        Stores detected homonyms in self._detected_homonyms for use by the URL filter.
         """
         if not self.valves.USE_QUERY_EXPANSION:
             return [query]
@@ -1163,28 +1219,28 @@ class Tools:
             )
 
         prompt = f"""You are a search query expansion expert. Your goal is to find MORE results about the SAME concept, not broader or related concepts.
-        
-        Original query: "{query}"
-        
-        **Step 1 — Identify the core concept:**
-        Before generating any terms, explicitly state:
-        - What is the EXACT meaning of the key subject in this query? (not a category, the specific thing)
-        - Are there homonyms or other meanings for this word that must be AVOIDED?
-        
-        **Step 2 — Generate {self.valves.MAX_EXPANDED_QUERIES} search terms following these rules:**
-        - Every term MUST be about the identical concept identified in Step 1
-        - Include: synonyms, scientific names, alternative phrasings, specific subtopics
-        - Each term must contain enough context words to disambiguate from homonyms
-          (e.g., if the subject has multiple meanings, add a disambiguating word)
-        - Keep terms under 10 words each
-        - NEVER generate terms that are a broader category (e.g., "fruit" alone)
-        - NEVER generate terms about a different meaning of the same word
-        
-        **Output format:**
-        First output your Step 1 analysis as a comment, then output ONLY a JSON list:
-        // Core concept: [your analysis here]
-        // Homonyms to avoid: [list them]
-        ["term 1", "term 2", ...]"""
+    
+    Original query: "{query}"
+    
+    **Step 1 — Identify the core concept:**
+    Before generating any terms, explicitly state:
+    - What is the EXACT meaning of the key subject in this query? (not a category, the specific thing)
+    - Are there homonyms or other meanings for this word that must be AVOIDED?
+    
+    **Step 2 — Generate {self.valves.MAX_EXPANDED_QUERIES} search terms following these rules:**
+    - Every term MUST be about the identical concept identified in Step 1
+    - Include: synonyms, scientific names, alternative phrasings, specific subtopics
+    - Each term must contain enough context words to disambiguate from homonyms
+      (e.g., if the subject has multiple meanings, add a disambiguating word)
+    - Keep terms under 10 words each
+    - NEVER generate terms that are a broader category (e.g., "fruit" alone)
+    - NEVER generate terms about a different meaning of the same word
+    
+    **Output format:**
+    First output your Step 1 analysis as comments, then output ONLY a JSON list:
+    // Core concept: [your analysis here]
+    // Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
+    ["term 1", "term 2", ...]"""
 
         try:
             if model:
@@ -1196,7 +1252,7 @@ class Tools:
                     payload = {
                         "model": model,
                         "prompt": prompt,
-                        "system": "You are a precise search query expander. Respond only with the requested JSON list.",
+                        "system": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
                         "stream": False,
                         "options": {
                             "temperature": 0.0,
@@ -1239,7 +1295,7 @@ class Tools:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a precise search query expander. Respond only with the requested JSON list.",
+                                "content": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
                             },
                             {"role": "user", "content": prompt},
                         ],
@@ -1296,11 +1352,11 @@ class Tools:
                     payload = {
                         "model": valve_model,
                         "prompt": prompt,
-                        "system": "You are a precise search query expander. Respond only with the requested JSON list.",
+                        "system": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
                         "stream": False,
                         "options": {
                             "temperature": 0.3,
-                            "num_predict": 500,
+                            "num_predict": 700,
                         },
                     }
                     response = requests.post(ollama_url, json=payload, timeout=30)
@@ -1333,12 +1389,12 @@ class Tools:
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are a precise search query expander. Respond only with the requested JSON list.",
+                                "content": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
                             },
                             {"role": "user", "content": prompt},
                         ],
                         "temperature": 0.3,
-                        "max_tokens": 500,
+                        "max_tokens": 700,
                     }
 
                     response = requests.post(
@@ -1372,6 +1428,24 @@ class Tools:
                     )
 
             import json
+
+            # Extract homonyms from Step 1 comment and store for use by URL filter
+            self._detected_homonyms = []
+            homonym_match = re.search(
+                r"//\s*Homonyms to avoid:\s*(.+)", content, re.IGNORECASE
+            )
+            if homonym_match:
+                raw = homonym_match.group(1).strip()
+                self._detected_homonyms = [
+                    h.strip().lower()
+                    for h in re.split(r"[,;]", raw)
+                    if h.strip()
+                    and h.strip().lower() not in ("none", "ninguno", "n/a", "-")
+                ]
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"Detected homonyms from expansion: {self._detected_homonyms}"
+                    )
 
             json_match = re.search(r"\[.*\]", content, re.DOTALL)
             if json_match:
@@ -1563,9 +1637,13 @@ class Tools:
             score += 1.0
 
         if "wikipedia.org/wiki/" in url_lower and "/wiki/" in url_lower:
-            score += 8.0
-            if len(url_lower.split("/wiki/")[-1]) > 20:
-                score += 2.0
+            wiki_slug = url_lower.split("/wiki/")[-1]
+            if "desambiguaci" in wiki_slug or "disambiguation" in wiki_slug:
+                score -= 15.0  # Nunca debería llegar al crawler
+            else:
+                score += 8.0
+                if len(wiki_slug) > 20:
+                    score += 2.0
 
         if "github.com" in url_lower:
             if "/blob/" in url_lower and any(
@@ -1667,6 +1745,7 @@ class Tools:
     ) -> List[str]:
         """Filter URLs using LLM for semantic relevance.
         Uses active user model when provided; falls back to valve configuration.
+        Leverages self._detected_homonyms if populated by _expand_query_with_llm.
         """
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
@@ -1711,7 +1790,6 @@ class Tools:
         for url, title in results:
             url_titles[url] = title
 
-        # Use active model if provided, otherwise fall back to valve config
         base_url = self.valves.LLM_BASE_URL.rstrip("/")
         api_token = (
             self.valves.LLM_API_TOKEN.strip()
@@ -1727,27 +1805,40 @@ class Tools:
             if "/" in used_model:
                 used_model = used_model.split("/", 1)[1]
 
-        prompt = f"""Task: For each URL, output "KEEP" or "REJECT".
+        # Build homonym context from expansion step if available
+        homonym_context = ""
+        detected = getattr(self, "_detected_homonyms", [])
+        if detected:
+            homonym_list = ", ".join(detected)
+            homonym_context = f"\nPre-detected homonyms (MUST REJECT pages about these): {homonym_list}\n"
 
-Query: "{query}"
-
-DECISION RULES (apply in order):
-1. REJECT if the page is a disambiguation page (title contains "desambiguación" or "disambiguation").
-2. REJECT if the page is a category, portal, template, or "List of..." page.
-3. REJECT if the page is about a DIFFERENT fruit/plant/object than the query.
-4. KEEP only if the page is specifically about the query's subject.
-
-EXAMPLES of what "different subject" means:
-- Query about "fresa" (strawberry fruit) → REJECT "Mora" (blackberry), "Fresadora" (milling machine), "Fresa (Argot)" (slang)
-- Query about "manzana" (apple fruit) → REJECT "Manzana (desambiguación)", "Manzanilla" (chamomile)
-
-OUTPUT: JSON list ONLY. Example: [{{"index":1,"decision":"KEEP"}}, {{"index":2,"decision":"REJECT"}}]
-
-URLs:
-"""
+        prompt = f"""You are a strict semantic URL filter. Your ONLY job is to determine if each URL is about the EXACT same concept as the query — with special attention to homonyms and false matches.
+    
+    Query: "{query}"
+    {homonym_context}
+    == STEP 1: Anchor the concept (do this BEFORE evaluating any URL) ==
+    Identify:
+    - TARGET CONCEPT: What precise thing is the query about? Be specific (not just the word, but its exact meaning in this context).
+    - KNOWN HOMONYMS: What OTHER things share this word or name? List all you can think of (add to the pre-detected ones above if any).
+    
+    == STEP 2: Evaluate each URL ==
+    For EACH URL apply this chain of reasoning:
+      A. What does this page describe? (infer from URL path + title)
+      B. Is this the TARGET CONCEPT, or is it one of the HOMONYMS / a related-but-different topic?
+      C. Is it a disambiguation page, category, portal, template, or "List of..." page? → always REJECT
+      D. Final decision: KEEP or REJECT
+    
+    REJECTION BIAS: When in any doubt → REJECT. A false negative (missing a good page) is better than crawling an irrelevant one.
+    
+    == OUTPUT ==
+    Return ONLY a JSON list, no preamble, no explanation outside the JSON:
+    [{{"index":1,"decision":"KEEP"}},{{"index":2,"decision":"REJECT"}}]
+    
+    URLs to evaluate:
+    """
         for idx, url in enumerate(urls, 1):
             title = url_titles.get(url, "No title available")
-            prompt += f"""{idx}. URL: {url}\n   Title: {title}\n"""
+            prompt += f"{idx}. URL: {url}\n   Title: {title}\n"
 
         try:
             if is_ollama:
@@ -1794,7 +1885,7 @@ URLs:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": 0.2,
+                    "temperature": 0.1,
                     "max_tokens": 500,
                 }
 
