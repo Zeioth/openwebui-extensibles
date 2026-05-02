@@ -1235,6 +1235,30 @@ class Tools:
     - Keep terms under 10 words each
     - NEVER generate terms that are a broader category (e.g., "fruit" alone)
     - NEVER generate terms about a different meaning of the same word
+            prompt = f"""You are a search query expansion expert. Your goal is to find MORE results about the SAME concept, not broader or related concepts.
+    
+    Original query: "{query}"
+    
+    **Step 1 — Identify the core concept:**
+    Before generating any terms, explicitly state:
+    - What is the EXACT meaning of the key subject in this query? (not a category, the specific thing)
+    - Are there homonyms or other meanings for this word that must be AVOIDED?
+    
+    **Step 2 — Generate {self.valves.MAX_EXPANDED_QUERIES} search terms following these rules:**
+    - Every term MUST be about the identical concept identified in Step 1
+    - Include: synonyms, scientific names, alternative phrasings, specific subtopics
+    - Each term must contain enough context words to disambiguate from homonyms
+      (e.g., if the subject has multiple meanings, add a disambiguating word)
+    - Keep terms under 10 words each
+    - NEVER generate terms that are a broader category (e.g., "fruit" alone)
+    - NEVER generate terms about a different meaning of the same word
+    - Include terms in BOTH the query's original language AND English when relevant
+    
+    **Output format:**
+    First output your Step 1 analysis as comments, then output ONLY a JSON list:
+    // Core concept: [your analysis here]
+    // Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
+    ["term 1", "term 2", ...]"""
     
     **Output format:**
     First output your Step 1 analysis as comments, then output ONLY a JSON list:
