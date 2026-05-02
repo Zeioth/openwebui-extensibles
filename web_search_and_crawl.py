@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.7
+version: 2.8.8
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
@@ -1719,12 +1719,19 @@ Do not include any other text in your response, only the JSON list."""
             if "/" in used_model:
                 used_model = used_model.split("/", 1)[1]
 
-        prompt = f"""You are a web search relevance filter. Your task is to analyze each URL and its title, then decide if the page is LIKELY to contain information relevant to the search query.
+        prompt = f"""You are a strict search relevance filter. Your only task is to decide if each URL is DIRECTLY about the topic the user asked for.
 
 Search Query: "{query}"
 
-For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" if it is obviously unrelated.
+Rules:
+- KEEP only URLs that specifically address the core subject of the query
+- REJECT pages about related but DIFFERENT topics (e.g., if the query is about strawberries, reject pages about blackberries, raspberries, or general fruit classifications unless strawberries are the main focus)
+- REJECT generic Wikipedia category pages, disambiguation pages, or list-of-articles pages that merely mention the topic
+- The page title should clearly reflect the query subject; synonyms and scientific names are acceptable
 
+BEFORE answering, ask yourself: Is this page primarily about the exact topic the user asked for?
+
+For each URL below, respond with only "KEEP" if it is DIRECTLY relevant, or "REJECT" if it is not.
 """
         for idx, url in enumerate(urls, 1):
             title = url_titles.get(url, "No title available")
