@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.6
+version: 2.8.7
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
@@ -14,6 +14,7 @@ requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 import os
 import re
 import traceback
+import anyio
 import requests
 import orjson
 import tiktoken
@@ -1917,7 +1918,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
             return []
 
         try:
-            user = Users.get_user_by_id(__user__["id"])
+            user = await Users.get_user_by_id(__user__["id"])
             if user is None:
                 logger.error("User not found")
                 return []
@@ -2069,7 +2070,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
         active_model = None
         if __user__:
             try:
-                user = Users.get_user_by_id(__user__["id"])
+                user = await Users.get_user_by_id(__user__["id"])
                 if user and hasattr(user, "settings") and user.settings:
                     active_model = user.settings.get("model")
             except Exception as e:
@@ -2108,7 +2109,7 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                     {
                         "type": "status",
                         "data": {
-                            "description": f"🧠 AI Semantic Filtering\nAnalyzing {len(gathered_urls)} URLs...",
+                            "description": f"🧠 AI Semantic Filtering analyzing {len(gathered_urls)} URLs...",
                             "done": False,
                         },
                     }
@@ -2547,10 +2548,12 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
             "crawler_config": crawler_config.dump(),
         }
 
+        timeout = self.valves.CRAWL4AI_TIMEOUT * len(urls) + 60
         try:
-            timeout = self.valves.CRAWL4AI_TIMEOUT * len(urls) + 60
-            response = requests.post(
-                endpoint, json=payload, headers=headers, timeout=timeout
+            response = await anyio.to_thread.run_sync(
+                lambda: requests.post(
+                    endpoint, json=payload, headers=headers, timeout=timeout
+                )
             )
             response.raise_for_status()
             data = response.json()
@@ -2735,8 +2738,8 @@ For each URL below, respond with only "KEEP" if it seems relevant, or "REJECT" i
                 "links": all_links if extract_links else [],
             }
 
-        except requests.exceptions.ConnectionError as e:
-            error_msg = f"Cannot connect to Crawl4AI at {endpoint}. Please verify Crawl4AI is running."
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            error_msg = f"Cannot connect to Crawl4AI at {endpoint}: {str(e)}"
             logger.error(error_msg)
             return {"error": error_msg, "content": [], "images": [], "videos": []}
         except Exception as e:
