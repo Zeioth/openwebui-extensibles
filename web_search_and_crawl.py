@@ -1252,7 +1252,6 @@ class Tools:
     - Keep terms under 10 words each
     - NEVER generate terms that are a broader category (e.g., "fruit" alone)
     - NEVER generate terms about a different meaning of the same word
-    - Include terms in BOTH the query's original language AND English when relevant
     
     **Output format:**
     First output your Step 1 analysis as comments, then output ONLY a JSON list:
