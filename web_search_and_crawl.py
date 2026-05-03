@@ -763,6 +763,7 @@ class Tools:
             "/wiki/File:",
             "/wiki/Template:",
             "/wiki/Category:",
+            "/wiki/Categor%C3%ADa",
             "/wiki/Help:",
             "/wiki/Special:",
         )
