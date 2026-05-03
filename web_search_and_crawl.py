@@ -757,6 +757,20 @@ class Tools:
             "/frame/",  # Frames
             "/iframe/",  # Iframes
             "?iframe=",  # Iframe parameter
+            "/wiki/Wikipedia:",
+            "/wiki/Portal:",
+            "/wiki/Ayuda:",
+            "/wiki/Especial:",
+            "/wiki/Main_Page",
+            "/wiki/Contents",
+            "/wiki/Community_portal",
+            "/wiki/Recent_changes",
+            "/wiki/File:",
+            "/wiki/Template:",
+            "/wiki/Category:",
+            "/wiki/Categor%C3%ADa",
+            "/wiki/Help:",
+            "/wiki/Special:",
         )
 
         # Check static extensions
@@ -787,24 +801,11 @@ class Tools:
                 "/wiki/especial:",
                 "/wiki/main_page",
                 "/wiki/contents",
+                "/wiki/categor%C3%ADa",
                 "/wiki/help:",
                 "/wiki/special:",
                 "/wiki/file:",
                 "/wiki/template:",
-                "/wiki/Wikipedia:",
-                "/wiki/Portal:",
-                "/wiki/Ayuda:",
-                "/wiki/Especial:",
-                "/wiki/Main_Page",
-                "/wiki/Contents",
-                "/wiki/Community_portal",
-                "/wiki/Recent_changes",
-                "/wiki/File:",
-                "/wiki/Template:",
-                "/wiki/Category:",
-                "/wiki/Categor%C3%ADa",
-                "/wiki/Help:",
-                "/wiki/Special:",
             )
             if any(pattern in url_lower for pattern in wikipedia_namespaces):
                 if self.valves.DEBUG:
@@ -1306,7 +1307,7 @@ class Tools:
                             {"role": "user", "content": prompt},
                         ],
                         "temperature": 0.0,
-                        "max_tokens": 1500,
+                        "max_tokens": 2000,
                     }
 
                     response = requests.post(
@@ -1902,7 +1903,7 @@ class Tools:
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
-                        "num_predict": 1500,
+                        "num_predict": 2000,
                     },
                 }
                 response = requests.post(ollama_url, json=payload, timeout=30)
@@ -1938,7 +1939,7 @@ class Tools:
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 1500,
+                    "max_tokens": 2000,
                 }
 
                 response = requests.post(
