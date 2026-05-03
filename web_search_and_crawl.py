@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.8
+version: 2.8.10
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
