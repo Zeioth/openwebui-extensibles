@@ -436,33 +436,12 @@ class Tools:
                             },
                             "research_mode": {
                                 "type": "boolean",
-                                "description": (
-                                    "Enable deep research crawling. Set to true whenever the user "
-                                    "requests in-depth research, specifies a crawl strategy, or asks "
-                                    "for exhaustive results. When true, use research_crawl_mode to "
-                                    "select the strategy."
-                                ),
+                                "description": "Enables Research Mode which performs deeper web crawling using advanced strategies. When enabled, the LLM can also specify a research_crawl_mode parameter to choose the crawling strategy.",
                                 "default": False,
                             },
                             "research_crawl_mode": {
                                 "type": "string",
-                                "enum": [
-                                    "pseudo_adaptive",
-                                    "llm_guided",
-                                    "bfs_deep",
-                                    "research_filter",
-                                ],
-                                "description": (
-                                    "Crawling strategy for research mode. "
-                                    "Setting this automatically enables research_mode. "
-                                    "pseudo_adaptive: keyword scoring to prioritize URLs. "
-                                    "llm_guided: LLM selects which links to follow next. "
-                                    "bfs_deep: breadth-first layer-by-layer exploration. "
-                                    "research_filter: seed URLs then follows promising links. "
-                                    "Use 'llm_guided' when the user mentions guided, smart, or LLM strategy. "
-                                    "Use 'bfs_deep' for exhaustive crawling. "
-                                    "Use 'pseudo_adaptive' (default) for keyword-relevance crawling."
-                                ),
+                                "description": "Optional crawling strategy for research mode: pseudo_adaptive (keyword-based scoring), llm_guided (LLM selects links), bfs_deep (breadth-first), research_filter (URL filtering). Only used when research_mode is true.",
                                 "default": None,
                             },
                         },
@@ -1898,15 +1877,12 @@ class Tools:
     
     == STEP 2: Evaluate each URL ==
     For EACH URL apply this chain of reasoning:
-      A. What is the PRIMARY SUBJECT of this page? (not what it mentions, but what it's ABOUT)
-      B. Is the PRIMARY SUBJECT the TARGET CONCEPT? 
-         → If the target appears only as an example, ingredient, or list item: REJECT
-         → If the page is a list/category that happens to include the target: REJECT  
-         → Only KEEP if the page is fundamentally about the target concept itself
-      C. Disambiguation/category/portal/template/"List of..."? → always REJECT
+      A. What does this page describe? (infer from URL path + title)
+      B. Is this the TARGET CONCEPT, or is it one of the HOMONYMS / a related-but-different topic?
+      C. Is it a disambiguation page, category, portal, template, or "List of..." page? → always REJECT
+      D. Final decision: KEEP or REJECT
     
-    STRICT RULE: A page about ice cream flavors that mentions strawberry is NOT about strawberry.
-    A page about strawberry cultivars IS about strawberry.
+    REJECTION BIAS: When in any doubt → REJECT. A false negative (missing a good page) is better than crawling an irrelevant one.
     
     == OUTPUT ==
     Return ONLY a JSON list, no preamble, no explanation outside the JSON:
