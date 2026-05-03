@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.8
+version: 2.8.10
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
@@ -757,20 +757,6 @@ class Tools:
             "/frame/",  # Frames
             "/iframe/",  # Iframes
             "?iframe=",  # Iframe parameter
-            "/wiki/Wikipedia:",
-            "/wiki/Portal:",
-            "/wiki/Ayuda:",
-            "/wiki/Especial:",
-            "/wiki/Main_Page",
-            "/wiki/Contents",
-            "/wiki/Community_portal",
-            "/wiki/Recent_changes",
-            "/wiki/File:",
-            "/wiki/Template:",
-            "/wiki/Category:",
-            "/wiki/Categor%C3%ADa",
-            "/wiki/Help:",
-            "/wiki/Special:",
         )
 
         # Check static extensions
@@ -805,6 +791,20 @@ class Tools:
                 "/wiki/special:",
                 "/wiki/file:",
                 "/wiki/template:",
+                "/wiki/Wikipedia:",
+                "/wiki/Portal:",
+                "/wiki/Ayuda:",
+                "/wiki/Especial:",
+                "/wiki/Main_Page",
+                "/wiki/Contents",
+                "/wiki/Community_portal",
+                "/wiki/Recent_changes",
+                "/wiki/File:",
+                "/wiki/Template:",
+                "/wiki/Category:",
+                "/wiki/Categor%C3%ADa",
+                "/wiki/Help:",
+                "/wiki/Special:",
             )
             if any(pattern in url_lower for pattern in wikipedia_namespaces):
                 if self.valves.DEBUG:
