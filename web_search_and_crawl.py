@@ -1226,7 +1226,7 @@ class Tools:
                 }
             )
 
-        prompt = f"""You are a search query expansion expert. Your goal is to find MORE results about the SAME concept, not broader or related concepts.
+        prompt = f"""You are a search query expansion expert. Your task is to generate search terms that preserve the EXACT intended meaning of the original query, including any disambiguation.
     
     Original query: "{query}"
     
@@ -1248,7 +1248,9 @@ class Tools:
     First output your Step 1 analysis as comments, then output ONLY a JSON list:
     // Core concept: [your analysis here]
     // Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
-    ["term 1", "term 2", ...]"""
+    ["term 1", "term 2", ...]
+    
+    """
 
         try:
             if model:
@@ -1623,127 +1625,6 @@ class Tools:
 
         return all_urls
 
-    def _url_relevance_score(self, url: str, query: str) -> float:
-        """Calculate relevance score for a URL using heuristics."""
-        score = 0.0
-        url_lower = url.lower()
-        query_lower = query.lower()
-        query_words = query_lower.split()
-
-        if query_lower in url_lower:
-            score += 10.0
-
-        for word in query_words:
-            if len(word) > 3:
-                if word in url_lower:
-                    score += 2.0
-
-        if any(
-            ext in url_lower
-            for ext in [".html", ".htm", "/article/", "/post/", "/blog/"]
-        ):
-            score += 1.0
-
-        if "wikipedia.org/wiki/" in url_lower and "/wiki/" in url_lower:
-            wiki_slug = url_lower.split("/wiki/")[-1]
-            if "desambiguaci" in wiki_slug or "disambiguation" in wiki_slug:
-                score -= 15.0  # Should never reach the crawler
-            else:
-                score += 8.0
-                if len(wiki_slug) > 20:
-                    score += 2.0
-
-        if "github.com" in url_lower:
-            if "/blob/" in url_lower and any(
-                ext in url_lower for ext in [".md", ".markdown", ".rst"]
-            ):
-                score += 5.0
-            elif "github.com/" in url_lower and url_lower.count("/") == 3:
-                score += 4.0
-
-        if "reddit.com" in url_lower and "/comments/" in url_lower:
-            score += 3.0
-
-        if any(
-            pattern in url_lower
-            for pattern in [
-                "/tag/",
-                "/category/",
-                "/author/",
-                "/feed",
-                "/rss",
-                "/comment",
-                "/login",
-                "/signup",
-                "/cart",
-                "/checkout",
-            ]
-        ):
-            score -= 3.0
-
-        trusted_domains = [
-            "wikipedia.org",
-            "github.com",
-            "stackoverflow.com",
-            "medium.com",
-            "arxiv.org",
-            "news.ycombinator.com",
-        ]
-        for domain in trusted_domains:
-            if domain in url_lower:
-                score += 5.0
-
-        return score
-
-    async def _report_url_ranking(
-        self,
-        urls: List[str],
-        scores: List[float],
-        query: str,
-        __event_emitter__: Callable[[dict], Any] = None,
-    ) -> None:
-        """Report top ranked URLs to the user."""
-        if not __event_emitter__ or not self.valves.MORE_STATUS:
-            return
-
-        top_count = min(5, len(urls))
-        if top_count == 0:
-            return
-
-        ranking_summary = "📊 Ranking URLs by relevance:\n\n"
-        for i in range(top_count):
-            url = urls[i]
-            score = scores[i] if i < len(scores) else 0
-
-            parsed = urlparse(url)
-            domain = parsed.netloc
-            path = parsed.path[:50] if parsed.path else ""
-
-            if score >= 15:
-                indicator = "🔥"
-            elif score >= 10:
-                indicator = "⭐"
-            elif score >= 5:
-                indicator = "✅"
-            else:
-                indicator = "➖"
-
-            ranking_summary += f"{indicator} {i+1}. `{domain}` - Score: {score:.1f}\n"
-            ranking_summary += f"   📄 {path if path else '/'}\n\n"
-
-        ranking_summary += f"📈 Analyzed {len(urls)} URLs, selected the {min(self.valves.CRAWL4AI_MAX_URLS, len(urls))} most relevant."
-
-        await __event_emitter__(
-            {
-                "type": "status",
-                "data": {
-                    "description": ranking_summary,
-                    "done": False,
-                },
-            }
-        )
-        await asyncio.sleep(0.5)
-
     async def _filter_urls_with_llm(
         self,
         urls: List[str],
@@ -1866,30 +1747,42 @@ class Tools:
             homonym_list = ", ".join(detected)
             homonym_context = f"\nPre-detected homonyms (MUST REJECT pages about these): {homonym_list}\n"
 
-        prompt = f"""You are a strict semantic URL filter. Your ONLY job is to determine if each URL is about the EXACT same concept as the query — with special attention to homonyms and false matches.
-    
-    Query: "{query}"
-    {homonym_context}
-    == STEP 1: Anchor the concept (do this BEFORE evaluating any URL) ==
-    Identify:
-    - TARGET CONCEPT: What precise thing is the query about? Be specific (not just the word, but its exact meaning in this context).
-    - KNOWN HOMONYMS: What OTHER things share this word or name? List all you can think of (add to the pre-detected ones above if any).
-    
-    == STEP 2: Evaluate each URL ==
-    For EACH URL apply this chain of reasoning:
-      A. What does this page describe? (infer from URL path + title)
-      B. Is this the TARGET CONCEPT, or is it one of the HOMONYMS / a related-but-different topic?
-      C. Is it a disambiguation page, category, portal, template, or "List of..." page? → always REJECT
-      D. Final decision: KEEP or REJECT
-    
-    REJECTION BIAS: When in any doubt → REJECT. A false negative (missing a good page) is better than crawling an irrelevant one.
-    
-    == OUTPUT ==
-    Return ONLY a JSON list, no preamble, no explanation outside the JSON:
-    [{{"index":1,"decision":"KEEP"}},{{"index":2,"decision":"REJECT"}}]
-    
-    URLs to evaluate:
-    """
+        prompt = f"""You are a semantic URL filter. Your task is to determine if a URL is about the EXACT SAME CONCEPT as the user's query.
+        
+        USER QUERY: "{query}"
+        
+        == DISAMBIGUATION STEP (REQUIRED - do this before evaluating any URL) ==
+        
+        The query may contain ambiguous words. Based on the FULL CONTEXT of the query:
+        
+        1. Identify the INTENDED meaning of key terms
+        2. List alternative meanings (homonyms) that should be REJECTED
+        3. State the core concept in a clear, unambiguous phrase
+        
+        Example:
+        Query: "clasificacion de tipos de fresa (fruta)"
+        → Intended: Fruit (strawberry) classification/taxonomy
+        → Reject: Dental burs, milling cutters, strawberry plant morphology only (without fruit classification)
+        
+        == EVALUATION RULES ==
+        
+        For each URL, apply this reasoning:
+        - Does the page content match the INTENDED meaning identified above?
+        - Does it contain terms from the REJECT list? → REJECT if yes
+        - If the query explicitly includes a disambiguator like "(fruta)", "(fruit)", "(dental)", etc., RESPECT IT
+        
+        REJECT when:
+        - The URL is about a homonym/alternative meaning
+        - The URL is a disambiguation page, category, portal, or "List of..."
+        - You are uncertain (false negative is better than crawling irrelevant content)
+        
+        == OUTPUT ==
+        
+        Return ONLY a JSON list:
+        [{{"index":1,"decision":"KEEP"}},{{"index":2,"decision":"REJECT"}}]
+        
+        URLs to evaluate:
+        """
         for idx, url in enumerate(urls, 1):
             title = url_titles.get(url, "No title available")
             prompt += f"{idx}. URL: {url}\n   Title: {title}\n"
@@ -1979,7 +1872,7 @@ class Tools:
                     for item in decisions
                     if item.get("decision") == "KEEP"
                 }
-                filtered_urls = [urls[i] for i in keep_indices if i < len(urls)]
+                filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
 
                 if self.valves.DEBUG:
                     logger.info(
@@ -2327,38 +2220,12 @@ class Tools:
                     )
                 return f"No relevant URLs were found for the query: {query}."
 
+        # Separamos las URLs proporcionadas por el usuario de las de búsqueda
         search_only_urls = [
             url for url in gathered_urls if url not in user_provided_urls
         ]
 
-        if search_only_urls:
-            scores = [self._url_relevance_score(url, query) for url in search_only_urls]
-
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "🎯 Evaluating result relevance...\nAnalyzing each URL by:\n• Search match\n• Domain quality\n• Relevant content patterns",
-                            "done": False,
-                        },
-                    }
-                )
-                await asyncio.sleep(0.3)
-
-            search_only_urls.sort(
-                key=lambda url: self._url_relevance_score(url, query), reverse=True
-            )
-            sorted_scores = [
-                self._url_relevance_score(url, query) for url in search_only_urls
-            ]
-            await self._report_url_ranking(
-                search_only_urls, sorted_scores, query, __event_emitter__
-            )
-
-            if self.valves.DEBUG:
-                logger.info(f"Top 5 URLs by relevance score: {search_only_urls[:5]}")
-
+        # Unimos las URLs del usuario primero, luego las de búsqueda (en orden original)
         gathered_urls = user_provided_urls + search_only_urls
 
         max_urls = self.user_valves.CRAWL4AI_MAX_URLS or self.valves.CRAWL4AI_MAX_URLS
@@ -2370,7 +2237,7 @@ class Tools:
                     {
                         "type": "status",
                         "data": {
-                            "description": f"✂️ Limiting to {max_urls} most relevant URLs (from {len(gathered_urls)} total, using LLM scoring)",
+                            "description": f"✂️ Limitando a {max_urls} URLs (de {len(gathered_urls)} total). Priorizando URLs proporcionadas por el usuario.",
                             "done": False,
                         },
                     }
