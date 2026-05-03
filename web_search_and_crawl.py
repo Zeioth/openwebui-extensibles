@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.10
+version: 2.8.8
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
@@ -643,6 +643,11 @@ class Tools:
             "section=",  # Specific section
             "#",  # Internal anchors
             ".wikipedia.org/wiki/special:",  # Special in lowercase
+            "simple.wikipedia.org",  # alternative domain
+            "m.wikipedia.org",  # phone version
+            "en.m.wikipedia.org",  # phone version
+            "es.m.wikipedia.org",  # phone version
+            "wikimedia.org",  # institutional site
         )
 
         # Reddit-specific patterns to exclude
