@@ -2227,9 +2227,13 @@ class Tools:
                 user = await Users.get_user_by_id(__user__["id"])
                 if user and hasattr(user, "settings") and user.settings:
                     settings = user.settings
-                    active_model = user.settings.get("model")
-                    if self.valves.DEBUG:
-                        logger.info(f"Active user model: {active_model}")
+                    # UserSettings is a Pydantic object, not a dict
+                    if hasattr(settings, "model"):
+                        active_model = settings.model
+                    elif isinstance(settings, dict):
+                        active_model = settings.get("model")
+                if self.valves.DEBUG:
+                    logger.info(f"Active user model: {active_model}")
             except Exception as e:
                 logger.warning(f"Could not obtain user model: {e}")
 
