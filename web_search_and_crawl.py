@@ -766,7 +766,6 @@ class Tools:
             "/wiki/Community_portal",
             "/wiki/Recent_changes",
             "/wiki/File:",
-            "/wiki/Talk:",
             "/wiki/Template:",
             "/wiki/Category:",
             "/wiki/Categor%C3%ADa",
@@ -806,6 +805,7 @@ class Tools:
                 "/wiki/help:",
                 "/wiki/special:",
                 "/wiki/file:",
+                "/wiki/talk:",
                 "/wiki/template:",
             )
             if any(pattern in url_lower for pattern in wikipedia_namespaces):
