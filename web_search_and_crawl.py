@@ -766,6 +766,7 @@ class Tools:
             "/wiki/Community_portal",
             "/wiki/Recent_changes",
             "/wiki/File:",
+            "/wiki/Talk:",
             "/wiki/Template:",
             "/wiki/Category:",
             "/wiki/Categor%C3%ADa",
