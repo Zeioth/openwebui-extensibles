@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.9
+version: 2.8.10
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
@@ -1154,7 +1154,7 @@ class Tools:
             ]
 
             # Anchor words: the longest terms are the most semantically specific
-            anchor_keywords = sorted(preflight_keywords, key=len, reverse=True)[:2]
+            anchor_keywords = sorted(set(preflight_keywords), key=len, reverse=True)[:2]
 
             if preflight_keywords:
                 if self.valves.DEBUG:
@@ -1235,29 +1235,6 @@ class Tools:
     - Keep terms under 10 words each
     - NEVER generate terms that are a broader category (e.g., "fruit" alone)
     - NEVER generate terms about a different meaning of the same word
-            prompt = f"""You are a search query expansion expert. Your goal is to find MORE results about the SAME concept, not broader or related concepts.
-    
-    Original query: "{query}"
-    
-    **Step 1 — Identify the core concept:**
-    Before generating any terms, explicitly state:
-    - What is the EXACT meaning of the key subject in this query? (not a category, the specific thing)
-    - Are there homonyms or other meanings for this word that must be AVOIDED?
-    
-    **Step 2 — Generate {self.valves.MAX_EXPANDED_QUERIES} search terms following these rules:**
-    - Every term MUST be about the identical concept identified in Step 1
-    - Include: synonyms, scientific names, alternative phrasings, specific subtopics
-    - Each term must contain enough context words to disambiguate from homonyms
-      (e.g., if the subject has multiple meanings, add a disambiguating word)
-    - Keep terms under 10 words each
-    - NEVER generate terms that are a broader category (e.g., "fruit" alone)
-    - NEVER generate terms about a different meaning of the same word
-    
-    **Output format:**
-    First output your Step 1 analysis as comments, then output ONLY a JSON list:
-    // Core concept: [your analysis here]
-    // Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
-    ["term 1", "term 2", ...]"""
     
     **Output format:**
     First output your Step 1 analysis as comments, then output ONLY a JSON list:
@@ -1323,7 +1300,7 @@ class Tools:
                             {"role": "user", "content": prompt},
                         ],
                         "temperature": 0.0,
-                        "max_tokens": 700,
+                        "max_tokens": 1500,
                     }
 
                     response = requests.post(
@@ -1784,6 +1761,53 @@ class Tools:
                 }
             )
 
+        # pre-filter - reject homonimn slugs
+        detected = getattr(self, "_detected_homonyms", [])
+        if detected:
+            pre_filtered = []
+            for url in urls:
+                slug = urlparse(url).path.lower()
+                slug_clean = slug.replace("_", " ").replace("-", " ")
+                rejected = False
+                for homonym in detected:
+                    homonym_clean = homonym.replace("_", " ").replace("-", " ")
+                    # Primero intentar match de frase completa
+                    if re.search(rf"\b{re.escape(homonym_clean)}\b", slug_clean):
+                        rejected = True
+                        break
+                    # Si falla, comprobar que TODOS los tokens significativos del homónimo están en el slug
+                    tokens = [t for t in homonym_clean.split() if len(t) > 4]
+                    if tokens and all(t in slug_clean for t in tokens):
+                        if self.valves.DEBUG:
+                            logger.info(
+                                f"Pre-filter (token match): rejected {url} (homonym: '{homonym}')"
+                            )
+                        rejected = True
+                        break
+                if not rejected:
+                    pre_filtered.append(url)
+
+            removed = len(urls) - len(pre_filtered)
+            if removed > 0:
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"Pre-filter removed {removed} URLs by homonym slug match"
+                    )
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"Pre-filter: removed {removed} URL{'s' if removed != 1 else ''} by homonym match.",
+                                "done": False,
+                            },
+                        }
+                    )
+            urls = pre_filtered
+
+        if not urls:
+            return []
+
         url_titles = {}
 
         async def fetch_title(url: str) -> tuple[str, str]:
@@ -1830,7 +1854,6 @@ class Tools:
 
         # Build homonym context from expansion step if available
         homonym_context = ""
-        detected = getattr(self, "_detected_homonyms", [])
         if detected:
             homonym_list = ", ".join(detected)
             homonym_context = f"\nPre-detected homonyms (MUST REJECT pages about these): {homonym_list}\n"
@@ -1873,7 +1896,7 @@ class Tools:
                     "stream": False,
                     "options": {
                         "temperature": 0.1,
-                        "num_predict": 500,
+                        "num_predict": 1500,
                     },
                 }
                 response = requests.post(ollama_url, json=payload, timeout=30)
@@ -1909,7 +1932,7 @@ class Tools:
                         {"role": "user", "content": prompt},
                     ],
                     "temperature": 0.1,
-                    "max_tokens": 500,
+                    "max_tokens": 1500,
                 }
 
                 response = requests.post(
@@ -2203,7 +2226,14 @@ class Tools:
             try:
                 user = await Users.get_user_by_id(__user__["id"])
                 if user and hasattr(user, "settings") and user.settings:
-                    active_model = user.settings.get("model")
+                    settings = user.settings
+                    # UserSettings es un objeto Pydantic, no un dict
+                    if hasattr(settings, "model"):
+                        active_model = settings.model
+                    elif isinstance(settings, dict):
+                        active_model = settings.get("model")
+                if self.valves.DEBUG:
+                    logger.info(f"Active user model: {active_model}")
             except Exception as e:
                 logger.warning(f"Could not obtain user model: {e}")
 
@@ -2576,6 +2606,7 @@ class Tools:
         urls: Union[list, str],
         query: Optional[str] = None,
         extract_links: bool = False,
+        skip_validation: bool = False,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
         """
@@ -2589,9 +2620,10 @@ class Tools:
             for url in urls
         ]
 
-        urls = await self._validate_url_pipeline(
-            urls, query, __event_emitter__=__event_emitter__
-        )
+        if not skip_validation:
+            urls = await self._validate_url_pipeline(
+                urls, query, __event_emitter__=__event_emitter__
+            )
 
         if not urls:
             return {"content": [], "images": [], "videos": [], "links": []}
@@ -2750,7 +2782,6 @@ class Tools:
                                 if match.startswith("/")
                                 else f"{parsed_url.scheme}://{parsed_url.netloc}/{match}"
                             )
-                        # Filter invalid URLs at extraction time
                         if not self._is_valid_crawl_url(match):
                             continue
                         if match.startswith("http") and self._is_html_url(match):
@@ -3005,6 +3036,7 @@ class Tools:
                     urls=[url],
                     query=query,
                     extract_links=True,
+                    skip_validation=True,
                     __event_emitter__=__event_emitter__,
                 )
 
@@ -3156,9 +3188,9 @@ class Tools:
                 urls=[current_url],
                 query=query,
                 extract_links=True,
+                skip_validation=True,
                 __event_emitter__=__event_emitter__,
             )
-
             if result.get("content"):
                 normalized_content = self._normalize_content(result["content"])
                 if normalized_content:
@@ -3329,6 +3361,7 @@ class Tools:
                     urls=[url],
                     query=query,
                     extract_links=True,
+                    skip_validation=True,  # ← already validated above by _validate_url_pipeline
                     __event_emitter__=__event_emitter__,
                 )
 
@@ -3469,13 +3502,12 @@ class Tools:
                     }
                 )
 
-            source_result = await self._crawl_url(
+            link_result = await self._crawl_url(
                 urls=[source_url],
                 query=query,
-                extract_links=True,
+                skip_validation=True,
                 __event_emitter__=__event_emitter__,
             )
-
             if source_result.get("content"):
                 normalized_content = self._normalize_content(source_result["content"])
                 if normalized_content:
@@ -3584,7 +3616,10 @@ class Tools:
                     )
 
                 link_result = await self._crawl_url(
-                    urls=[link], query=query, __event_emitter__=__event_emitter__
+                    urls=[link],
+                    query=query,
+                    skip_validation=True,
+                    __event_emitter__=__event_emitter__,
                 )
 
                 if link_result.get("content"):
