@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.10
+version: 2.8.8
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
 """
@@ -1639,7 +1639,7 @@ class Tools:
         if "wikipedia.org/wiki/" in url_lower and "/wiki/" in url_lower:
             wiki_slug = url_lower.split("/wiki/")[-1]
             if "desambiguaci" in wiki_slug or "disambiguation" in wiki_slug:
-                score -= 15.0  # Nunca debería llegar al crawler
+                score -= 15.0  # Should never reach the crawler
             else:
                 score += 8.0
                 if len(wiki_slug) > 20:
@@ -1771,11 +1771,11 @@ class Tools:
                 rejected = False
                 for homonym in detected:
                     homonym_clean = homonym.replace("_", " ").replace("-", " ")
-                    # Primero intentar match de frase completa
+                    # First try full phrase match
                     if re.search(rf"\b{re.escape(homonym_clean)}\b", slug_clean):
                         rejected = True
                         break
-                    # Si falla, comprobar que TODOS los tokens significativos del homónimo están en el slug
+                    # If it fails, check that ALL significant tokens of the homonym are in the slug
                     tokens = [t for t in homonym_clean.split() if len(t) > 4]
                     if tokens and all(t in slug_clean for t in tokens):
                         if self.valves.DEBUG:
@@ -2227,13 +2227,9 @@ class Tools:
                 user = await Users.get_user_by_id(__user__["id"])
                 if user and hasattr(user, "settings") and user.settings:
                     settings = user.settings
-                    # UserSettings es un objeto Pydantic, no un dict
-                    if hasattr(settings, "model"):
-                        active_model = settings.model
-                    elif isinstance(settings, dict):
-                        active_model = settings.get("model")
-                if self.valves.DEBUG:
-                    logger.info(f"Active user model: {active_model}")
+                    active_model = user.settings.get("model")
+                    if self.valves.DEBUG:
+                        logger.info(f"Active user model: {active_model}")
             except Exception as e:
                 logger.warning(f"Could not obtain user model: {e}")
 
@@ -3502,10 +3498,10 @@ class Tools:
                     }
                 )
 
-            link_result = await self._crawl_url(
+            source_result = await self._crawl_url(
                 urls=[source_url],
                 query=query,
-                skip_validation=True,
+                skip_validation=True,  # already validated above
                 __event_emitter__=__event_emitter__,
             )
             if source_result.get("content"):
