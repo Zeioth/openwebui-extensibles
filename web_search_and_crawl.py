@@ -436,12 +436,34 @@ class Tools:
                             },
                             "research_mode": {
                                 "type": "boolean",
-                                "description": "Enables Research Mode which performs deeper web crawling using advanced strategies. When enabled, the LLM can also specify a research_crawl_mode parameter to choose the crawling strategy.",
-                                "default": False,
+                                "description": (
+                                    "Enable deep research crawling. Use true for queries requiring multiple sources, "
+                                    "comprehensive information gathering, or complex analysis.\n"
+                                    "Use false for simple facts, quick lookups, recent news, or when a single page suffices.\n"
+                                    "Leave unset to let the system decide based on your best judgment.\n\n"
+                                    "When to use research mode:\n"
+                                    "- Comparisons (e.g., 'compare X vs Y')\n"
+                                    "- Historical overviews (e.g., 'history of the Roman Empire')\n"
+                                    "- Latest developments in a field (e.g., 'best practices for microservices in 2025')\n"
+                                    "- Multi‑faceted questions (e.g., 'impact of climate change on agriculture')\n\n"
+                                    "When NOT to use research mode:\n"
+                                    "- Simple definitions (e.g., 'define photosynthesis')\n"
+                                    "- Current time, weather, or stock price\n"
+                                    "- Single fact lookup (e.g., 'height of Mount Everest')\n"
+                                    "- Recent breaking news (single event)"
+                                ),
+                                "default": None,
                             },
                             "research_crawl_mode": {
                                 "type": "string",
-                                "description": "Optional crawling strategy for research mode: pseudo_adaptive (keyword-based scoring), llm_guided (LLM selects links), bfs_deep (breadth-first), research_filter (URL filtering). Only used when research_mode is true.",
+                                "description": (
+                                    "Crawling strategy if research mode is enabled:\n"
+                                    "- pseudo_adaptive: for factual queries, news, or simple lookups.\n"
+                                    "- llm_guided: when you need to select links based on actual content relevance.\n"
+                                    "- bfs_deep: for exhaustive topic coverage (e.g., systematic reviews).\n"
+                                    "- research_filter: when you start from a seed list and only want to follow promising links.\n"
+                                    "Only used when research_mode is true."
+                                ),
                                 "default": None,
                             },
                         },
