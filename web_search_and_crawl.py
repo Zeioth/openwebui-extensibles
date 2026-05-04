@@ -1819,7 +1819,7 @@ class Tools:
                         {
                             "type": "status",
                             "data": {
-                                "description": f"LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {len(urls) - len(filtered_urls)}.",
+                                "description": f"✅ LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {len(urls) - len(filtered_urls)}.",
                                 "done": False,
                             },
                         }
