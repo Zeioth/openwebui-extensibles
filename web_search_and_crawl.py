@@ -2348,17 +2348,22 @@ class Tools:
                 video_list.extend(research_result["videos"])
 
         else:
+            # Validate ALL URLs once before batching
+            gathered_urls = await self._validate_url_pipeline(
+                gathered_urls,
+                query,
+                check_keywords=True,
+                __event_emitter__=__event_emitter__,
+            )
+
             for i in range(0, len(gathered_urls), self.valves.CRAWL4AI_BATCH):
                 batch = gathered_urls[i : i + self.valves.CRAWL4AI_BATCH]
-                # Validate batch URLs before crawling (non-research mode)
-                batch = await self._validate_url_pipeline(
-                    batch, query, __event_emitter__=__event_emitter__
-                )
-                if not batch:
-                    continue
                 try:
                     crawled_batch = await self._crawl_url(
-                        urls=batch, query=query, __event_emitter__=__event_emitter__
+                        urls=batch,
+                        query=query,
+                        skip_validation=True,
+                        __event_emitter__=__event_emitter__,
                     )
 
                     if self.valves.DEBUG:
