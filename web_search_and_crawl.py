@@ -1582,7 +1582,7 @@ class Tools:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"Using LLM to filter {len(urls)} URLs for relevance...",
+                        "description": f"🧠 Using LLM to filter {len(urls)} URLs for relevance...",
                         "done": False,
                     },
                 }
@@ -2084,46 +2084,9 @@ class Tools:
             return f"No URLs found to crawl for the query: {query}."
 
         if self.valves.USE_LLM_URL_FILTER and len(gathered_urls) > 0:
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"🧠 AI Semantic Filtering analyzing {len(gathered_urls)} URLs...",
-                            "done": False,
-                        },
-                    }
-                )
-                await asyncio.sleep(0.2)
-
-            before_filter_count = len(gathered_urls)
             gathered_urls = await self._filter_urls_with_llm(
                 gathered_urls, query, __event_emitter__
             )
-
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                removed_count = before_filter_count - len(gathered_urls)
-                if removed_count > 0:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"✅ AI filter: removed {removed_count} irrelevant URL{'s' if removed_count != 1 else ''}. {len(gathered_urls)} remain.",
-                                "done": False,
-                            },
-                        }
-                    )
-                else:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": "✅ AI filter: all URLs appear relevant.",
-                                "done": False,
-                            },
-                        }
-                    )
-                await asyncio.sleep(0.3)
 
             if not gathered_urls:
                 if __event_emitter__:
