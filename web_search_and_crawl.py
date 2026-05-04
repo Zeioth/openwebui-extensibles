@@ -237,6 +237,18 @@ class Tools:
                 "anthropic/claude-2",
             ],
         )
+        EXPANSION_LLM_PROVIDER: str = Field(
+            title="LLM Provider for Query Expansion",
+            default="",
+            description="LLM provider/model to use for query expansion. If empty, falls back to LLM_PROVIDER.",
+            examples=["ollama/llama3.2", "openai/gpt-4o-mini"],
+        )
+        FILTER_LLM_PROVIDER: str = Field(
+            title="LLM Provider for URL Filtering",
+            default="",
+            description="LLM provider/model to use for URL filtering. If empty, falls back to LLM_PROVIDER.",
+            examples=["ollama/llama3.2", "openai/gpt-4o-mini"],
+        )
         LLM_TEMPERATURE: float = Field(
             title="LLM Temperature",
             default=0.3,
@@ -1228,11 +1240,9 @@ class Tools:
         self,
         query: str,
         __event_emitter__: Callable[[dict], Any] = None,
-        model: Optional[str] = None,
     ) -> List[str]:
         """Generate related search terms using LLM.
-        Uses active user model when provided; falls back to valve configuration.
-        Stores detected homonyms in self._detected_homonyms for use by the URL filter.
+        Uses EXPANSION_LLM_PROVIDER valve (falls back to LLM_PROVIDER).
         """
         if not self.valves.USE_QUERY_EXPANSION:
             return [query]
@@ -1274,190 +1284,98 @@ class Tools:
     
     """
 
+        base_url = self.valves.LLM_BASE_URL.rstrip("/")
+        provider = self.valves.EXPANSION_LLM_PROVIDER or self.valves.LLM_PROVIDER
+        api_token = (
+            self.valves.LLM_API_TOKEN.strip()
+            if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
+            else None
+        )
+
+        valve_model = provider
+        if "/" in valve_model:
+            valve_model = valve_model.split("/", 1)[1]
+
+        is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
+
         try:
-            if model:
-                base_url = self.valves.LLM_BASE_URL.rstrip("/")
-                is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
+            if is_ollama:
+                ollama_url = f"{base_url}/api/generate"
+                payload = {
+                    "model": valve_model,
+                    "prompt": prompt,
+                    "system": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.3,
+                        "num_predict": 700,
+                    },
+                }
+                response = requests.post(ollama_url, json=payload, timeout=30)
 
-                if is_ollama:
-                    ollama_url = f"{base_url}/api/generate"
-                    payload = {
-                        "model": model,
-                        "prompt": prompt,
-                        "system": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
-                        "stream": False,
-                        "options": {
-                            "temperature": 0.0,
-                            "num_predict": 700,
-                        },
-                    }
-                    response = requests.post(ollama_url, json=payload, timeout=30)
-
-                    if response.status_code != 200:
-                        logger.error(
-                            f"Ollama expansion error {response.status_code}: {response.text[:200]}"
-                        )
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "⚠️ Query expansion failed. Using original query.",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                        return [query]
-
-                    result = response.json()
-                    content = result.get("response", "")
-                else:
-                    headers = {"Content-Type": "application/json"}
-                    api_token = (
-                        self.valves.LLM_API_TOKEN.strip()
-                        if self.valves.LLM_API_TOKEN
-                        and self.valves.LLM_API_TOKEN.strip()
-                        else None
+                if response.status_code != 200:
+                    logger.error(
+                        f"Ollama expansion error {response.status_code}: {response.text[:200]}"
                     )
-                    if api_token:
-                        headers["Authorization"] = f"Bearer {api_token}"
-
-                    payload = {
-                        "model": model,
-                        "messages": [
+                    if __event_emitter__:
+                        await __event_emitter__(
                             {
-                                "role": "system",
-                                "content": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
-                            },
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.0,
-                        "max_tokens": 2000,
-                    }
-
-                    response = requests.post(
-                        f"{base_url}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                        timeout=30,
-                    )
-
-                    if response.status_code != 200:
-                        logger.error(
-                            f"Expansion error {response.status_code}: {response.text[:200]}"
+                                "type": "status",
+                                "data": {
+                                    "description": "⚠️ Query expansion failed. Using original query.",
+                                    "done": False,
+                                },
+                            }
                         )
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "⚠️ Query expansion failed. Using original query.",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                        return [query]
+                    return [query]
 
-                    result = response.json()
-                    content = (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
+                result = response.json()
+                content = result.get("response", "")
             else:
-                base_url = self.valves.LLM_BASE_URL.rstrip("/")
-                provider = self.valves.LLM_PROVIDER
-                api_token = (
-                    self.valves.LLM_API_TOKEN.strip()
-                    if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
-                    else None
+                headers = {"Content-Type": "application/json"}
+                if api_token:
+                    headers["Authorization"] = f"Bearer {api_token}"
+
+                payload = {
+                    "model": valve_model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 700,
+                }
+
+                response = requests.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=30,
                 )
 
-                valve_model = provider
-                if "/" in valve_model:
-                    valve_model = valve_model.split("/", 1)[1]
-
-                is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
-
-                if is_ollama:
-                    ollama_url = f"{base_url}/api/generate"
-                    payload = {
-                        "model": valve_model,
-                        "prompt": prompt,
-                        "system": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
-                        "stream": False,
-                        "options": {
-                            "temperature": 0.3,
-                            "num_predict": 700,
-                        },
-                    }
-                    response = requests.post(ollama_url, json=payload, timeout=30)
-
-                    if response.status_code != 200:
-                        logger.error(
-                            f"Ollama expansion error {response.status_code}: {response.text[:200]}"
-                        )
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "⚠️ Query expansion failed. Using original query.",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                        return [query]
-
-                    result = response.json()
-                    content = result.get("response", "")
-                else:
-                    headers = {"Content-Type": "application/json"}
-                    if api_token:
-                        headers["Authorization"] = f"Bearer {api_token}"
-
-                    payload = {
-                        "model": valve_model,
-                        "messages": [
+                if response.status_code != 200:
+                    logger.error(
+                        f"Expansion error {response.status_code}: {response.text[:200]}"
+                    )
+                    if __event_emitter__:
+                        await __event_emitter__(
                             {
-                                "role": "system",
-                                "content": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
-                            },
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.3,
-                        "max_tokens": 700,
-                    }
-
-                    response = requests.post(
-                        f"{base_url}/chat/completions",
-                        json=payload,
-                        headers=headers,
-                        timeout=30,
-                    )
-
-                    if response.status_code != 200:
-                        logger.error(
-                            f"Expansion error {response.status_code}: {response.text[:200]}"
+                                "type": "status",
+                                "data": {
+                                    "description": "⚠️ Query expansion failed. Using original query.",
+                                    "done": False,
+                                },
+                            }
                         )
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "⚠️ Query expansion failed. Using original query.",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                        return [query]
+                    return [query]
 
-                    result = response.json()
-                    content = (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
+                result = response.json()
+                content = (
+                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                )
 
             import json
 
@@ -1652,11 +1570,9 @@ class Tools:
         urls: List[str],
         query: str,
         __event_emitter__: Callable[[dict], Any] = None,
-        model: Optional[str] = None,
     ) -> List[str]:
         """Filter URLs using LLM for semantic relevance.
-        Uses active user model when provided; falls back to valve configuration.
-        Leverages self._detected_homonyms if populated by _expand_query_with_llm.
+        Uses FILTER_LLM_PROVIDER valve (falls back to LLM_PROVIDER).
         """
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
@@ -1756,12 +1672,9 @@ class Tools:
         )
         is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
 
-        if model:
-            used_model = model
-        else:
-            used_model = self.valves.LLM_PROVIDER
-            if "/" in used_model:
-                used_model = used_model.split("/", 1)[1]
+        used_model = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
+        if "/" in used_model:
+            used_model = used_model.split("/", 1)[1]
 
         # Build homonym context from expansion step if available
         homonym_context = ""
@@ -2144,25 +2057,8 @@ class Tools:
                 }
             )
 
-        active_model = None
-        if __user__:
-            try:
-                user = await Users.get_user_by_id(__user__["id"])
-                if user and hasattr(user, "settings") and user.settings:
-                    settings = user.settings
-                    # UserSettings is a Pydantic object, not a dict
-                    if hasattr(settings, "model"):
-                        active_model = settings.model
-                    elif isinstance(settings, dict):
-                        active_model = settings.get("model")
-                if self.valves.DEBUG:
-                    logger.info(f"Active user model: {active_model}")
-            except Exception as e:
-                logger.warning(f"Could not obtain user model: {e}")
-
-        search_queries = await self._expand_query_with_llm(
-            query, __event_emitter__, model=active_model
-        )
+        # Expansion and filtering now use dedicated valves (no auto-detection)
+        search_queries = await self._expand_query_with_llm(query, __event_emitter__)
         search_urls = await self._search_all_queries(
             search_queries, __event_emitter__, __user__
         )
@@ -2202,7 +2098,7 @@ class Tools:
 
             before_filter_count = len(gathered_urls)
             gathered_urls = await self._filter_urls_with_llm(
-                gathered_urls, query, __event_emitter__, model=active_model
+                gathered_urls, query, __event_emitter__
             )
 
             if __event_emitter__ and self.valves.MORE_STATUS:
