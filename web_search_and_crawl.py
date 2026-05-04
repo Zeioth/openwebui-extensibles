@@ -1574,6 +1574,8 @@ class Tools:
         """Filter URLs using LLM for semantic relevance.
         Uses FILTER_LLM_PROVIDER valve (falls back to LLM_PROVIDER).
         """
+        import json  # At top so it's always defined
+
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
 
@@ -1722,6 +1724,7 @@ class Tools:
             title = url_titles.get(url, "No title available")
             prompt += f"{idx}. URL: {url}\n   Title: {title}\n"
 
+        filtered_urls = urls  # default
         try:
             if is_ollama:
                 ollama_url = f"{base_url}/api/generate"
@@ -1749,10 +1752,10 @@ class Tools:
                                 },
                             }
                         )
-                    return urls
-
-                result = response.json()
-                content = result.get("response", "")
+                    # filtered_urls stays = urls
+                else:
+                    result = response.json()
+                    content = result.get("response", "")
             else:
                 headers = {"Content-Type": "application/json"}
                 if api_token:
@@ -1790,45 +1793,37 @@ class Tools:
                                 },
                             }
                         )
-                    return urls
-
-                result = response.json()
-                content = (
-                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                )
-
-            import json
-
-            json_match = re.search(r"\[.*\]", content, re.DOTALL)
-            if json_match:
-                decisions = json.loads(json_match.group())
-                keep_indices = {
-                    item["index"] - 1
-                    for item in decisions
-                    if item.get("decision") == "KEEP"
-                }
-                filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
-
-                if self.valves.DEBUG:
-                    logger.info(
-                        f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
+                    # filtered_urls stays = urls
+                else:
+                    result = response.json()
+                    content = (
+                        result.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
                     )
 
-                if __event_emitter__ and self.valves.MORE_STATUS:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"✅ LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {len(urls) - len(filtered_urls)}.",
-                                "done": False,
-                            },
-                        }
-                    )
-
-                return filtered_urls
+            # Parse JSON decisions
+            if "content" in locals():
+                json_match = re.search(r"\[.*\]", content, re.DOTALL)
+                if json_match:
+                    decisions = json.loads(json_match.group())
+                    keep_indices = {
+                        item["index"] - 1
+                        for item in decisions
+                        if item.get("decision") == "KEEP"
+                    }
+                    filtered_urls = [
+                        urls[i] for i in range(len(urls)) if i in keep_indices
+                    ]
+                    if self.valves.DEBUG:
+                        logger.info(
+                            f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
+                        )
+                else:
+                    logger.warning("LLM URL filter: no valid JSON array in response")
 
         except Exception as e:
-            logger.error(f"LLM URL filter error: {e}")
+            logger.error(f"LLM URL filter error: {e}\n{traceback.format_exc()}")
             if __event_emitter__:
                 await __event_emitter__(
                     {
@@ -1839,8 +1834,20 @@ class Tools:
                         },
                     }
                 )
+            # filtered_urls stays = urls
 
-        return urls
+        # Always report the final result to the user
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            rejected = len(urls) - len(filtered_urls)
+            if rejected > 0:
+                description = f"✅ LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
+            else:
+                description = f"✅ LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
+            await __event_emitter__(
+                {"type": "status", "data": {"description": description, "done": False}}
+            )
+
+        return filtered_urls
 
     # endregion
 
