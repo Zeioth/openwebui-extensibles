@@ -310,11 +310,6 @@ class Tools:
             default=False,
             description="Use LLM to analyze and filter out URLs that are obviously unrelated to the search query. This adds a small delay but improves relevance and saves tokens.",
         )
-        LLM_URL_FILTER_CONCURRENCY: int = Field(
-            title="LLM URL Filter Concurrency",
-            default=5,
-            description="Number of concurrent LLM requests for URL filtering.",
-        )
         USE_QUERY_EXPANSION: bool = Field(
             title="Use Query Expansion",
             default=False,
