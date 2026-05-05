@@ -1104,6 +1104,76 @@ class Tools:
 
     # region ── URL Validation Pipeline ────────────────────────────────────────
 
+    async def _deduplicate_wikipedia_urls(
+        self,
+        urls: List[str],
+        __user__: Optional[dict] = None,
+    ) -> List[str]:
+        """
+        Keep only one Wikipedia URL per article, ignoring language variants.
+        Preference: user's language (from __user__), then first English, then first found.
+        Non-Wikipedia URLs are kept unchanged and in their original relative order.
+        """
+        from urllib.parse import unquote
+
+        # Determine user language (default: English)
+        user_lang = "en"
+        if __user__ and isinstance(__user__, dict):
+            user_lang = __user__.get("language", "en") or "en"
+
+        wiki_entries: dict[str, tuple[str, str]] = (
+            {}
+        )  # normalized_title -> (url, language_code)
+        non_wiki_urls = []
+
+        for url in urls:
+            # Match standard Wikipedia article pattern: lang.wikipedia.org/wiki/Title
+            match = re.match(r"^https?://([a-z]+)\.wikipedia\.org/wiki/(.+)", url)
+            if match:
+                lang = match.group(1)
+                raw_page = match.group(2)
+                # Normalize title: decode percent‑encoding, remove fragments, query params, trailing slash
+                page = unquote(raw_page).split("#")[0].split("?")[0].rstrip("/")
+                if not page:
+                    continue  # skip empty titles
+
+                if page not in wiki_entries:
+                    wiki_entries[page] = (url, lang)
+                else:
+                    existing_url, existing_lang = wiki_entries[page]
+                    # Keep the one that matches the user's language if not already matched
+                    if lang == user_lang and existing_lang != user_lang:
+                        wiki_entries[page] = (url, lang)
+                    # Otherwise keep the first one (no change)
+            else:
+                non_wiki_urls.append(url)
+
+        # Rebuild the URL list preserving original order:
+        # non‑Wikipedia URLs first, then one Wikipedia URL per article
+        # in the order they first appeared.
+        deduplicated = list(non_wiki_urls)
+        seen_titles = set()
+        for url in urls:
+            if url in non_wiki_urls:
+                continue
+            match = re.match(r"^https?://([a-z]+)\.wikipedia\.org/wiki/(.+)", url)
+            if match:
+                raw_page = match.group(2)
+                page = unquote(raw_page).split("#")[0].split("?")[0].rstrip("/")
+                if not page or page in seen_titles:
+                    continue
+                seen_titles.add(page)
+                # Add the chosen URL for this article
+                chosen_url, _ = wiki_entries[page]
+                deduplicated.append(chosen_url)
+
+        if self.valves.DEBUG and len(deduplicated) < len(urls):
+            logger.info(
+                f"Wikipedia deduplication: removed {len(urls) - len(deduplicated)} duplicate language variants"
+            )
+
+        return deduplicated
+
     async def _validate_url_pipeline(
         self,
         urls: List[str],
@@ -1707,7 +1777,6 @@ class Tools:
         - The URL is about a homonym/alternative meaning
         - The URL is a disambiguation page, category, portal, or "List of..."
         - You are uncertain (false negative is better than crawling irrelevant content)
-        - Wikipedia language duplicates: if multiple URLs are the same article (same /wiki/Title) in different languages, KEEP only ONE. Prefer the query's language; otherwise keep the first.
                 
         == OUTPUT ==
         
@@ -2069,6 +2138,10 @@ class Tools:
         for url in search_urls:
             if url not in gathered_urls:
                 gathered_urls.append(url)
+
+        # Remove Wikipedia articles that appear in multiple languages,
+        # keeping only the most relevant version (user language preferred).
+        gathered_urls = await self._deduplicate_wikipedia_urls(gathered_urls, __user__)
 
         if max_results and max_results > 0 and len(gathered_urls) > max_results:
             gathered_urls = gathered_urls[:max_results]
