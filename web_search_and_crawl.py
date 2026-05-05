@@ -1707,7 +1707,8 @@ class Tools:
         - The URL is about a homonym/alternative meaning
         - The URL is a disambiguation page, category, portal, or "List of..."
         - You are uncertain (false negative is better than crawling irrelevant content)
-        
+        - Wikipedia language duplicates: if multiple URLs are the same article (same /wiki/Title) in different languages, KEEP only ONE. Prefer the query's language; otherwise keep the first.
+                
         == OUTPUT ==
         
         Return ONLY a JSON list:
