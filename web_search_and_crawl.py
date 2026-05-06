@@ -3313,17 +3313,14 @@ class Tools:
             "images": [],
             "videos": [],
             "sources": {},
-            "total_pages": 0,
+            "total_pages": 0,  # now counts attempted pages (passed validation)
             "tokens_used": 0,
         }
 
         total_tokens = 0
 
         for source_url in start_urls[:5]:
-            if results["total_pages"] >= max_pages:
-                break
-
-            # Validate source URL before crawling
+            # Validate BEFORE emitting any status message
             validated = await self._validate_url_pipeline(
                 [source_url],
                 query,
@@ -3331,14 +3328,28 @@ class Tools:
                 __event_emitter__=__event_emitter__,
             )
             if not validated:
+                if self.valves.DEBUG:
+                    logger.debug(
+                        f"[Research-Filter] Skipping invalid source URL: {source_url[:100]}"
+                    )
                 continue
+
+            # If we have already reached the page limit, stop
+            if results["total_pages"] >= max_pages:
+                break
+
+            # Count this page as attempted (like the other research strategies)
+            results["total_pages"] += 1
 
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f"[Research-Filter] Researching: {source_url[:60]}... ({results['total_pages']}/{max_pages})",
+                            "description": (
+                                f"[Research-Filter] Researching: {source_url[:60]}... "
+                                f"({results['total_pages']}/{max_pages})"
+                            ),
                             "done": False,
                         },
                     }
@@ -3350,6 +3361,7 @@ class Tools:
                 skip_validation=True,  # already validated above
                 __event_emitter__=__event_emitter__,
             )
+
             if source_result.get("content"):
                 normalized_content = self._normalize_content(source_result["content"])
                 if normalized_content:
@@ -3371,13 +3383,16 @@ class Tools:
                         page_tokens = max_tokens
 
                     if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
-                        logger.warning(f"Token limit reached. Stopping research crawl.")
+                        logger.warning("Token limit reached. Stopping research crawl.")
                         if __event_emitter__ and self.valves.MORE_STATUS:
                             await __event_emitter__(
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": f"Token limit reached. Processed {results['total_pages']} pages.",
+                                        "description": (
+                                            f"Token limit reached. Processed "
+                                            f"{results['total_pages']} pages."
+                                        ),
                                         "done": False,
                                     },
                                 }
@@ -3396,7 +3411,9 @@ class Tools:
                             "links": source_result.get("links", [])[:10],
                         }
                         results["content"].extend(normalized_content)
-                        results["total_pages"] += 1
+                else:
+                    # Even if no usable normalized content, we still count the page as attempted
+                    pass
 
             results["images"].extend(source_result.get("images", []))
             results["videos"].extend(source_result.get("videos", []))
@@ -3404,9 +3421,9 @@ class Tools:
             if max_tokens > 0 and total_tokens >= max_tokens:
                 break
 
+            # Discover and follow promising links from this source
             scored_links = []
             for link in source_result.get("links", [])[:15]:
-                # Filter invalid URLs before scoring
                 if not self._is_valid_crawl_url(link):
                     if self.valves.DEBUG:
                         logger.debug(
@@ -3421,9 +3438,12 @@ class Tools:
 
             scored_links.sort(key=lambda x: x[1], reverse=True)
 
-            crawled = 0
+            crawled_links_from_source = 0
             for link, _ in scored_links:
-                if results["total_pages"] >= max_pages or crawled >= 3:
+                if (
+                    results["total_pages"] >= max_pages
+                    or crawled_links_from_source >= 3
+                ):
                     break
                 if max_tokens > 0 and total_tokens >= max_tokens:
                     break
@@ -3436,7 +3456,7 @@ class Tools:
                     ):
                         continue
 
-                # Validate link before crawling
+                # Validate the link before showing any status
                 validated_link = await self._validate_url_pipeline(
                     [link],
                     query,
@@ -3446,12 +3466,18 @@ class Tools:
                 if not validated_link:
                     continue
 
+                # Count this follow-up page as attempted
+                results["total_pages"] += 1
+
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
                             "type": "status",
                             "data": {
-                                "description": f"[Research-Filter] Following: {link[:60]}...",
+                                "description": (
+                                    f"[Research-Filter] Following: {link[:60]}... "
+                                    f"({results['total_pages']}/{max_pages})"
+                                ),
                                 "done": False,
                             },
                         }
@@ -3490,14 +3516,17 @@ class Tools:
 
                         if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
                             logger.warning(
-                                f"Token limit reached. Stopping research crawl."
+                                "Token limit reached. Stopping research crawl."
                             )
                             if __event_emitter__ and self.valves.MORE_STATUS:
                                 await __event_emitter__(
                                     {
                                         "type": "status",
                                         "data": {
-                                            "description": f"Token limit reached. Processed {results['total_pages']} pages.",
+                                            "description": (
+                                                f"Token limit reached. Processed "
+                                                f"{results['total_pages']} pages."
+                                            ),
                                             "done": False,
                                         },
                                     }
@@ -3506,8 +3535,7 @@ class Tools:
                         else:
                             total_tokens += page_tokens
                             results["content"].extend(normalized_link_content)
-                            results["total_pages"] += 1
-                            crawled += 1
+                            crawled_links_from_source += 1
 
                 results["images"].extend(link_result.get("images", []))
                 results["videos"].extend(link_result.get("videos", []))
@@ -3515,6 +3543,7 @@ class Tools:
             if max_tokens > 0 and total_tokens >= max_tokens:
                 break
 
+        # Final normalisation and sorting (unchanged)
         results["content"] = self._normalize_content(results["content"])
         results["content"].sort(
             key=lambda x: sum(
@@ -3526,7 +3555,8 @@ class Tools:
 
         if self.valves.DEBUG:
             logger.info(
-                f"[Research-Filter] Crawled {results['total_pages']} pages, used {total_tokens} tokens"
+                f"[Research-Filter] Crawled {results['total_pages']} pages, "
+                f"used {total_tokens} tokens"
             )
 
         return results
