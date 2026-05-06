@@ -1111,6 +1111,18 @@ class Tools:
         truncated_text = encoding.decode(truncated_tokens)
         return truncated_text + "\n\n[Content truncated due to length...]"
 
+    async def _estimate_llm_call_tokens(
+        self, prompt: str, completion: str, model: str = "gpt-4"
+    ) -> int:
+        """
+        Estimate total tokens consumed by a single LLM call (prompt + response).
+        """
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(prompt)) + len(encoding.encode(completion))
+
     # endregion
 
     # region ── URL Validation Pipeline ────────────────────────────────────────
@@ -1333,7 +1345,7 @@ class Tools:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"Generating related search terms for '{query}'...",
+                        "description": f"🧠 Generating related search terms for '{query}'...",
                         "done": False,
                     },
                 }
@@ -1493,30 +1505,39 @@ class Tools:
                     if self.valves.DEBUG:
                         logger.info(f"Query expansion: {query} -> {all_queries}")
 
+                    # ── Token reporting (before any return) ──
+                    tokens_used = await self._estimate_llm_call_tokens(prompt, content)
                     if __event_emitter__ and self.valves.MORE_STATUS:
-                        queries_display = "\n".join(
-                            [f"  • {q}" for q in all_queries[1:]]
-                        )
-                        if len(all_queries) > 1:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": f"🔍 Expanded search terms:\n{queries_display}",
-                                        "done": False,
-                                    },
-                                }
-                            )
                         await __event_emitter__(
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"Will search using {len(all_queries)} terms (including original)",
+                                    "description": f"🧠 Query expansion used {tokens_used} tokens.",
+                                    "done": False,
+                                },
+                            }
+                        )
+                    if self.valves.DEBUG:
+                        logger.info(
+                            f"Query expansion LLM call consumed {tokens_used} tokens."
+                        )
+
+                    # ── N terms generated report (before any return) ──
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        queries_display = "\n".join(
+                            [f"  • {q}" for q in all_queries[1:]]
+                        )
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"🔍 Will search using {len(all_queries)} terms (including original)",
                                     "done": False,
                                 },
                             }
                         )
 
+                    # Now return the expanded queries
                     return all_queries
 
             logger.warning("Query expansion: LLM response did not contain valid JSON")
@@ -1883,6 +1904,22 @@ class Tools:
                         .get("content", "")
                     )
 
+            # ── Token reporting (only if LLM call succeeded) ──
+            if "content" in locals():
+                tokens_used = await self._estimate_llm_call_tokens(prompt, content)
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🧠 LLM URL filtering used {tokens_used} tokens.",
+                                "done": False,
+                            },
+                        }
+                    )
+                if self.valves.DEBUG:
+                    logger.info(f"LLM URL filter call consumed {tokens_used} tokens.")
+
             # Parse JSON decisions
             if "content" in locals():
                 json_match = re.search(r"\[.*\]", content, re.DOTALL)
@@ -2139,7 +2176,7 @@ class Tools:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"Searching for '{query}'...",
+                        "description": f"🔍 Searching for '{query}'...",
                         "done": False,
                     },
                 }
@@ -2210,7 +2247,7 @@ class Tools:
                     {
                         "type": "status",
                         "data": {
-                            "description": f"✂️ Limitando a {max_urls} URLs (de {len(gathered_urls)} total). Priorizando URLs proporcionadas por el usuario.",
+                            "description": f"✂️ Limiting to {max_urls} URLs (from {len(gathered_urls)} total). Prioritizing URLs provided by the user.",
                             "done": False,
                         },
                     }
