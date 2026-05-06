@@ -1406,6 +1406,96 @@ class Tools:
 
     # region ── LLM Query Expansion & URL Filter ───────────────────────────────
 
+    def _extract_homonyms_from_llm_response(self, content: str) -> List[str]:
+        """Extract homonyms from LLM response (Step 1 comment)."""
+        homonyms = []
+        homonym_match = re.search(
+            r"//\s*Homonyms to avoid:\s*(.+)", content, re.IGNORECASE
+        )
+        if homonym_match:
+            raw = homonym_match.group(1).strip()
+            homonyms = [
+                h.strip().lower()
+                for h in re.split(r"[,;]", raw)
+                if h.strip()
+                and h.strip().lower() not in ("none", "ninguno", "n/a", "-")
+            ]
+            if self.valves.DEBUG:
+                logger.info(f"Extracted homonyms from response: {homonyms}")
+        return homonyms
+
+    async def _detect_homonyms_llm(
+        self,
+        query: str,
+        __event_emitter__: Callable[[dict], Any] = None,
+    ) -> List[str]:
+        """Call LLM with a light prompt to detect homonyms for the query.
+        Used when query expansion is disabled but homonym pre-filtering is desired.
+        """
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "🔍 Detecting homonyms to avoid...",
+                        "done": False,
+                    },
+                }
+            )
+
+        prompt = f"""You are a disambiguation expert. Given the user query, identify homonyms (alternative meanings) that should be AVOIDED when searching for the main concept.
+
+User query: "{query}"
+
+Output format:
+// Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
+// (If no homonyms, write "none")
+
+Return ONLY the comment line, nothing else.
+"""
+
+        try:
+            # Use the main LLM provider (or a cheaper one if specified elsewhere)
+            provider = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
+            content = await self._call_llm(
+                prompt=prompt,
+                system="You are a precise homonym detector. Respond only with the requested comment format.",
+                provider=provider,
+                temperature=0.1,
+                max_tokens=150,
+                timeout=30,
+            )
+            homonyms = self._extract_homonyms_from_llm_response(content)
+
+            tokens_used = await self._estimate_llm_call_tokens(prompt, content)
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🔍 Homonym detection used {tokens_used} tokens.",
+                            "done": False,
+                        },
+                    }
+                )
+            if self.valves.DEBUG:
+                logger.info(f"Homonym detection consumed {tokens_used} tokens.")
+            return homonyms
+
+        except Exception as e:
+            logger.error(f"Homonym detection error: {e}")
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "⚠️ Homonym detection failed, skipping pre-filter.",
+                            "done": False,
+                        },
+                    }
+                )
+            return []
+
     async def _expand_query_with_llm(
         self,
         query: str,
@@ -1481,22 +1571,7 @@ class Tools:
         import json
 
         # Extract homonyms from Step 1 comment and store for use by URL filter
-        self._detected_homonyms = []
-        homonym_match = re.search(
-            r"//\s*Homonyms to avoid:\s*(.+)", content, re.IGNORECASE
-        )
-        if homonym_match:
-            raw = homonym_match.group(1).strip()
-            self._detected_homonyms = [
-                h.strip().lower()
-                for h in re.split(r"[,;]", raw)
-                if h.strip()
-                and h.strip().lower() not in ("none", "ninguno", "n/a", "-")
-            ]
-            if self.valves.DEBUG:
-                logger.info(
-                    f"Detected homonyms from expansion: {self._detected_homonyms}"
-                )
+        self._detected_homonyms = self._extract_homonyms_from_llm_response(content)
 
         json_match = re.search(r"\[.*\]", content, re.DOTALL)
         if json_match:
@@ -1673,18 +1748,13 @@ class Tools:
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
 
-        if __event_emitter__ and self.valves.MORE_STATUS:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"🧠 Using LLM to filter {len(urls)} URLs for relevance...",
-                        "done": False,
-                    },
-                }
+        # 1. Detect homonyms if not already present
+        if not self._detected_homonyms:
+            self._detected_homonyms = await self._detect_homonyms_llm(
+                query, __event_emitter__
             )
 
-        # pre-filter - reject homonym slugs
+        # 2. Apply homonym pre-filter (this may reduce the URL list)
         detected = getattr(self, "_detected_homonyms", [])
         if detected:
             pre_filtered = []
@@ -1694,11 +1764,9 @@ class Tools:
                 rejected = False
                 for homonym in detected:
                     homonym_clean = homonym.replace("_", " ").replace("-", " ")
-                    # First try full phrase match
                     if re.search(rf"\b{re.escape(homonym_clean)}\b", slug_clean):
                         rejected = True
                         break
-                    # If it fails, check that ALL significant tokens of the homonym are in the slug
                     tokens = [t for t in homonym_clean.split() if len(t) > 4]
                     if tokens and all(t in slug_clean for t in tokens):
                         if self.valves.DEBUG:
@@ -1727,6 +1795,17 @@ class Tools:
                         }
                     )
             urls = pre_filtered
+
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"🧠 Using LLM to filter {len(urls)} URLs for relevance...",
+                        "done": False,
+                    },
+                }
+            )
 
         if not urls:
             return []
@@ -2762,7 +2841,7 @@ class Tools:
                         {
                             "type": "status",
                             "data": {
-                                "description": "No content extracted from this page.",
+                                "description": "No content extracted of context.",
                                 "done": False,
                             },
                         }
@@ -2979,7 +3058,7 @@ class Tools:
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": f"Extracted {page_tokens} tokens from this page.",
+                                        "description": f"Extracted {page_tokens} tokens of context.",
                                         "done": False,
                                     },
                                 }
@@ -2993,7 +3072,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": "No content extracted from this page.",
+                                    "description": "No content extracted of context.",
                                     "done": False,
                                 },
                             }
@@ -3145,7 +3224,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"Extracted {page_tokens} tokens from this page.",
+                                    "description": f"Extracted {page_tokens} tokens of context.",
                                     "done": False,
                                 },
                             }
@@ -3159,7 +3238,7 @@ class Tools:
                         {
                             "type": "status",
                             "data": {
-                                "description": "No content extracted from this page.",
+                                "description": "No content extracted of context.",
                                 "done": False,
                             },
                         }
@@ -3336,7 +3415,7 @@ class Tools:
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": f"Extracted {page_tokens} tokens from this page.",
+                                        "description": f"Extracted {page_tokens} tokens of context.",
                                         "done": False,
                                     },
                                 }
@@ -3350,7 +3429,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": "No content extracted from this page.",
+                                    "description": "No content extracted of context.",
                                     "done": False,
                                 },
                             }
@@ -3506,7 +3585,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"Extracted {page_tokens} tokens from this page.",
+                                    "description": f"Extracted {page_tokens} tokens of context.",
                                     "done": False,
                                 },
                             }
@@ -3533,7 +3612,7 @@ class Tools:
                         {
                             "type": "status",
                             "data": {
-                                "description": "No content extracted from this page.",
+                                "description": "No content extracted of context.",
                                 "done": False,
                             },
                         }
@@ -3657,7 +3736,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": "No content extracted from this page.",
+                                    "description": "No content extracted of context.",
                                     "done": False,
                                 },
                             }
