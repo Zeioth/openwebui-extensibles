@@ -19,6 +19,7 @@ import requests
 import orjson
 import tiktoken
 import aiohttp
+import time
 import asyncio
 from urllib.parse import parse_qs, urlparse, quote
 from pydantic import BaseModel, Field
@@ -1327,6 +1328,82 @@ class Tools:
 
     # endregion
 
+    # region ── LLM Helper ─────────────────────────────────────────────────────
+
+    async def _call_llm(
+        self,
+        prompt: str,
+        system: str = "",
+        provider: str = "",
+        temperature: float = 0.3,
+        max_tokens: int = 700,
+        timeout: int = 120,
+    ) -> str:
+        """
+        Send a prompt to the configured LLM provider and return the completion text.
+        Uses Ollama if base URL indicates it, otherwise OpenAI‑compatible endpoint.
+        Runs the blocking HTTP call in a thread to avoid blocking the event loop.
+        Raises RuntimeError on HTTP errors or timeouts.
+        """
+        base_url = self.valves.LLM_BASE_URL.rstrip("/")
+        api_token = (
+            self.valves.LLM_API_TOKEN.strip()
+            if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
+            else None
+        )
+
+        model_str = provider or self.valves.LLM_PROVIDER
+        if "/" in model_str:
+            model_str = model_str.split("/", 1)[1]
+
+        is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
+
+        def _make_request():
+            if is_ollama:
+                ollama_url = f"{base_url}/api/generate"
+                payload = {
+                    "model": model_str,
+                    "prompt": prompt,
+                    "system": system,
+                    "stream": False,
+                    "options": {"temperature": temperature, "num_predict": max_tokens},
+                }
+                resp = requests.post(ollama_url, json=payload, timeout=timeout)
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"Ollama error {resp.status_code}: {resp.text[:200]}"
+                    )
+                return resp.json().get("response", "")
+            else:
+                headers = {"Content-Type": "application/json"}
+                if api_token:
+                    headers["Authorization"] = f"Bearer {api_token}"
+                payload = {
+                    "model": model_str,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                }
+                resp = requests.post(
+                    f"{base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                if resp.status_code != 200:
+                    raise RuntimeError(
+                        f"OpenAI error {resp.status_code}: {resp.text[:200]}"
+                    )
+                return resp.json()["choices"][0]["message"]["content"]
+
+        content = await anyio.to_thread.run_sync(_make_request)
+        return content
+
+    # endregion
+
     # region ── LLM Query Expansion & URL Filter ───────────────────────────────
 
     async def _expand_query_with_llm(
@@ -1345,7 +1422,7 @@ class Tools:
                 {
                     "type": "status",
                     "data": {
-                        "description": f"🧠 Generating related search terms for '{query}'...",
+                        "description": "🧠 Generating related search terms...",
                         "done": False,
                     },
                 }
@@ -1377,181 +1454,16 @@ class Tools:
     
     """
 
-        base_url = self.valves.LLM_BASE_URL.rstrip("/")
-        provider = self.valves.EXPANSION_LLM_PROVIDER or self.valves.LLM_PROVIDER
-        api_token = (
-            self.valves.LLM_API_TOKEN.strip()
-            if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
-            else None
-        )
-
-        valve_model = provider
-        if "/" in valve_model:
-            valve_model = valve_model.split("/", 1)[1]
-
-        is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
-
         try:
-            if is_ollama:
-                ollama_url = f"{base_url}/api/generate"
-                payload = {
-                    "model": valve_model,
-                    "prompt": prompt,
-                    "system": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.3,
-                        "num_predict": 700,
-                    },
-                }
-                response = requests.post(ollama_url, json=payload, timeout=30)
-
-                if response.status_code != 200:
-                    logger.error(
-                        f"Ollama expansion error {response.status_code}: {response.text[:200]}"
-                    )
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": "⚠️ Query expansion failed. Using original query.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    return [query]
-
-                result = response.json()
-                content = result.get("response", "")
-            else:
-                headers = {"Content-Type": "application/json"}
-                if api_token:
-                    headers["Authorization"] = f"Bearer {api_token}"
-
-                payload = {
-                    "model": valve_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 700,
-                }
-
-                response = requests.post(
-                    f"{base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=30,
-                )
-
-                if response.status_code != 200:
-                    logger.error(
-                        f"Expansion error {response.status_code}: {response.text[:200]}"
-                    )
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": "⚠️ Query expansion failed. Using original query.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    return [query]
-
-                result = response.json()
-                content = (
-                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                )
-
-            import json
-
-            # Extract homonyms from Step 1 comment and store for use by URL filter
-            self._detected_homonyms = []
-            homonym_match = re.search(
-                r"//\s*Homonyms to avoid:\s*(.+)", content, re.IGNORECASE
+            provider = self.valves.EXPANSION_LLM_PROVIDER or self.valves.LLM_PROVIDER
+            content = await self._call_llm(
+                prompt=prompt,
+                system="You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
+                provider=provider,
+                temperature=0.3,
+                max_tokens=700,
+                timeout=120,
             )
-            if homonym_match:
-                raw = homonym_match.group(1).strip()
-                self._detected_homonyms = [
-                    h.strip().lower()
-                    for h in re.split(r"[,;]", raw)
-                    if h.strip()
-                    and h.strip().lower() not in ("none", "ninguno", "n/a", "-")
-                ]
-                if self.valves.DEBUG:
-                    logger.info(
-                        f"Detected homonyms from expansion: {self._detected_homonyms}"
-                    )
-
-            json_match = re.search(r"\[.*\]", content, re.DOTALL)
-            if json_match:
-                related_queries = json.loads(json_match.group())
-                if isinstance(related_queries, list):
-                    related_queries = [
-                        str(q).strip() for q in related_queries if q and str(q).strip()
-                    ]
-                    all_queries = [query]
-                    for q in related_queries[: self.valves.MAX_EXPANDED_QUERIES]:
-                        if q and q.lower() != query.lower() and q not in all_queries:
-                            all_queries.append(q)
-
-                    if self.valves.DEBUG:
-                        logger.info(f"Query expansion: {query} -> {all_queries}")
-
-                    # ── Token reporting (before any return) ──
-                    tokens_used = await self._estimate_llm_call_tokens(prompt, content)
-                    if __event_emitter__ and self.valves.MORE_STATUS:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"🧠 Query expansion used {tokens_used} tokens.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    if self.valves.DEBUG:
-                        logger.info(
-                            f"Query expansion LLM call consumed {tokens_used} tokens."
-                        )
-
-                    # ── N terms generated report (before any return) ──
-                    if __event_emitter__ and self.valves.MORE_STATUS:
-                        queries_display = "\n".join(
-                            [f"  • {q}" for q in all_queries[1:]]
-                        )
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"🔍 Will search using {len(all_queries)} terms (including original)",
-                                    "done": False,
-                                },
-                            }
-                        )
-
-                    # Now return the expanded queries
-                    return all_queries
-
-            logger.warning("Query expansion: LLM response did not contain valid JSON")
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "⚠️ Could not parse expanded queries. Using original query.",
-                            "done": False,
-                        },
-                    }
-                )
-
         except Exception as e:
             logger.error(f"Query expansion error: {e}")
             if __event_emitter__:
@@ -1559,11 +1471,91 @@ class Tools:
                     {
                         "type": "status",
                         "data": {
-                            "description": "Query expansion failed, using original query.",
+                            "description": "⚠️ Query expansion failed. Using original query.",
                             "done": False,
                         },
                     }
                 )
+            return [query]
+
+        import json
+
+        # Extract homonyms from Step 1 comment and store for use by URL filter
+        self._detected_homonyms = []
+        homonym_match = re.search(
+            r"//\s*Homonyms to avoid:\s*(.+)", content, re.IGNORECASE
+        )
+        if homonym_match:
+            raw = homonym_match.group(1).strip()
+            self._detected_homonyms = [
+                h.strip().lower()
+                for h in re.split(r"[,;]", raw)
+                if h.strip()
+                and h.strip().lower() not in ("none", "ninguno", "n/a", "-")
+            ]
+            if self.valves.DEBUG:
+                logger.info(
+                    f"Detected homonyms from expansion: {self._detected_homonyms}"
+                )
+
+        json_match = re.search(r"\[.*\]", content, re.DOTALL)
+        if json_match:
+            related_queries = json.loads(json_match.group())
+            if isinstance(related_queries, list):
+                related_queries = [
+                    str(q).strip() for q in related_queries if q and str(q).strip()
+                ]
+                all_queries = [query]
+                for q in related_queries[: self.valves.MAX_EXPANDED_QUERIES]:
+                    if q and q.lower() != query.lower() and q not in all_queries:
+                        all_queries.append(q)
+
+                if self.valves.DEBUG:
+                    logger.info(f"Query expansion: {query} -> {all_queries}")
+
+                # ── Token reporting ──
+                tokens_used = await self._estimate_llm_call_tokens(prompt, content)
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🧠 Query expansion used {tokens_used} tokens.",
+                                "done": False,
+                            },
+                        }
+                    )
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"Query expansion LLM call consumed {tokens_used} tokens."
+                    )
+
+                # ── N terms generated report ──
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    queries_display = "\n".join([f"  • {q}" for q in all_queries[1:]])
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🔍 Will search using {len(all_queries)} terms (including original)",
+                                "done": False,
+                            },
+                        }
+                    )
+
+                return all_queries
+
+        logger.warning("Query expansion: LLM response did not contain valid JSON")
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "⚠️ Could not parse expanded queries. Using original query.",
+                        "done": False,
+                    },
+                }
+            )
 
         return [query]
 
@@ -1692,7 +1684,7 @@ class Tools:
                 }
             )
 
-        # pre-filter - reject homonimn slugs
+        # pre-filter - reject homonym slugs
         detected = getattr(self, "_detected_homonyms", [])
         if detected:
             pre_filtered = []
@@ -1729,7 +1721,7 @@ class Tools:
                         {
                             "type": "status",
                             "data": {
-                                "description": f"Pre-filter: removed {removed} URL{'s' if removed != 1 else ''} by homonym match.",
+                                "description": f"🧠 Pre-filter: removed {removed} URL{'s' if removed != 1 else ''} by homonym match.",
                                 "done": False,
                             },
                         }
@@ -1767,18 +1759,6 @@ class Tools:
         results = await asyncio.gather(*tasks)
         for url, title in results:
             url_titles[url] = title
-
-        base_url = self.valves.LLM_BASE_URL.rstrip("/")
-        api_token = (
-            self.valves.LLM_API_TOKEN.strip()
-            if self.valves.LLM_API_TOKEN and self.valves.LLM_API_TOKEN.strip()
-            else None
-        )
-        is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
-
-        used_model = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
-        if "/" in used_model:
-            used_model = used_model.split("/", 1)[1]
 
         # Build homonym context from expansion step if available
         homonym_context = ""
@@ -1827,119 +1807,19 @@ class Tools:
             prompt += f"{idx}. URL: {url}\n   Title: {title}\n"
 
         filtered_urls = urls  # default
+        filter_success = False  # Track if the LLM call actually succeeded
+
         try:
-            if is_ollama:
-                ollama_url = f"{base_url}/api/generate"
-                payload = {
-                    "model": used_model,
-                    "prompt": prompt,
-                    "system": "You are a precise URL relevance filter. Respond only with the requested JSON format.",
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.1,
-                        "num_predict": 2000,
-                    },
-                }
-                response = requests.post(ollama_url, json=payload, timeout=30)
-
-                if response.status_code != 200:
-                    logger.error(f"LLM URL filter Ollama error: {response.status_code}")
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": "LLM filter failed, continuing with all URLs.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    # filtered_urls stays = urls
-                else:
-                    result = response.json()
-                    content = result.get("response", "")
-            else:
-                headers = {"Content-Type": "application/json"}
-                if api_token:
-                    headers["Authorization"] = f"Bearer {api_token}"
-
-                payload = {
-                    "model": used_model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "You are a precise URL relevance filter. Respond only with the requested JSON format.",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    "temperature": 0.1,
-                    "max_tokens": 2000,
-                }
-
-                response = requests.post(
-                    f"{base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=30,
-                )
-
-                if response.status_code != 200:
-                    logger.error(f"LLM URL filter error: {response.status_code}")
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": "LLM filter failed, continuing with all URLs.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    # filtered_urls stays = urls
-                else:
-                    result = response.json()
-                    content = (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-
-            # ── Token reporting (only if LLM call succeeded) ──
-            if "content" in locals():
-                tokens_used = await self._estimate_llm_call_tokens(prompt, content)
-                if __event_emitter__ and self.valves.MORE_STATUS:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🧠 LLM URL filtering used {tokens_used} tokens.",
-                                "done": False,
-                            },
-                        }
-                    )
-                if self.valves.DEBUG:
-                    logger.info(f"LLM URL filter call consumed {tokens_used} tokens.")
-
-            # Parse JSON decisions
-            if "content" in locals():
-                json_match = re.search(r"\[.*\]", content, re.DOTALL)
-                if json_match:
-                    decisions = json.loads(json_match.group())
-                    keep_indices = {
-                        item["index"] - 1
-                        for item in decisions
-                        if item.get("decision") == "KEEP"
-                    }
-                    filtered_urls = [
-                        urls[i] for i in range(len(urls)) if i in keep_indices
-                    ]
-                    if self.valves.DEBUG:
-                        logger.info(
-                            f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
-                        )
-                else:
-                    logger.warning("LLM URL filter: no valid JSON array in response")
-
+            provider = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
+            content = await self._call_llm(
+                prompt=prompt,
+                system="You are a precise URL relevance filter. Respond only with the requested JSON format.",
+                provider=provider,
+                temperature=0.1,
+                max_tokens=2000,
+                timeout=120,
+            )
+            filter_success = True
         except Exception as e:
             logger.error(f"LLM URL filter error: {e}\n{traceback.format_exc()}")
             if __event_emitter__:
@@ -1952,18 +1832,56 @@ class Tools:
                         },
                     }
                 )
-            # filtered_urls stays = urls
+            # filter_success remains False, filtered_urls stays as urls
 
-        # Always report the final result to the user
-        if __event_emitter__ and self.valves.MORE_STATUS:
-            rejected = len(urls) - len(filtered_urls)
-            if rejected > 0:
-                description = f"✅ LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
+        # ── JSON parsing and status messages (only if LLM call succeeded) ──
+        if filter_success:
+            # 1. Parse JSON decisions to compute kept/rejected counts
+            json_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if json_match:
+                decisions = json.loads(json_match.group())
+                keep_indices = {
+                    item["index"] - 1
+                    for item in decisions
+                    if item.get("decision") == "KEEP"
+                }
+                filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
+                if self.valves.DEBUG:
+                    logger.info(
+                        f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
+                    )
             else:
-                description = f"✅ LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
-            await __event_emitter__(
-                {"type": "status", "data": {"description": description, "done": False}}
-            )
+                logger.warning("LLM URL filter: no valid JSON array in response")
+                # filtered_urls remains the original list (already set before try block)
+
+            # 2. Emit summary of kept/rejected URLs
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                rejected = len(urls) - len(filtered_urls)
+                if rejected > 0:
+                    description = f"🧠 LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
+                else:
+                    description = f"🧠 LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": description, "done": False},
+                    }
+                )
+
+            # 3. Emit token usage (after the summary)
+            tokens_used = await self._estimate_llm_call_tokens(prompt, content)
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🧠 LLM URL filtering used {tokens_used} tokens.",
+                            "done": False,
+                        },
+                    }
+                )
+            if self.valves.DEBUG:
+                logger.info(f"LLM URL filter call consumed {tokens_used} tokens.")
 
         return filtered_urls
 
@@ -2141,6 +2059,7 @@ class Tools:
         """
         Main entry point for web search and crawl.
         """
+        start_time = time.time()  # Record start time for elapsed measurement
         logger.info(f"Starting search and crawl for '{query}'")
 
         gathered_urls = []
@@ -2210,6 +2129,22 @@ class Tools:
                         },
                     }
                 )
+            elapsed = time.time() - start_time
+            elapsed_str = (
+                f"{elapsed:.2f} seconds"
+                if elapsed < 60
+                else f"{elapsed/60:.2f} minutes"
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"⏱️ Elapsed time: {elapsed_str}",
+                        "done": True,
+                    },
+                }
+            )
+            logger.info(f"Search and crawl finished in {elapsed_str}")
             return f"No URLs found to crawl for the query: {query}."
 
         if self.valves.USE_LLM_URL_FILTER and len(gathered_urls) > 0:
@@ -2228,6 +2163,22 @@ class Tools:
                             },
                         }
                     )
+                elapsed = time.time() - start_time
+                elapsed_str = (
+                    f"{elapsed:.2f} seconds"
+                    if elapsed < 60
+                    else f"{elapsed/60:.2f} minutes"
+                )
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"⏱️ Elapsed time: {elapsed_str}",
+                            "done": True,
+                        },
+                    }
+                )
+                logger.info(f"Search and crawl finished in {elapsed_str}")
                 return f"No relevant URLs were found for the query: {query}."
 
         # Separamos las URLs proporcionadas por el usuario de las de búsqueda
@@ -2502,6 +2453,21 @@ class Tools:
                 }
             )
 
+        elapsed = time.time() - start_time
+        elapsed_str = (
+            f"{elapsed:.2f} seconds" if elapsed < 60 else f"{elapsed/60:.2f} minutes"
+        )
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"⏱️ Elapsed time: {elapsed_str}",
+                        "done": True,
+                    },
+                }
+            )
+        logger.info(f"Search and crawl finished in {elapsed_str}")
         return crawl_results
 
     # endregion
@@ -3013,7 +2979,7 @@ class Tools:
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": f"Used {page_tokens} tokens for this page.",
+                                        "description": f"Extracted {page_tokens} tokens from this page.",
                                         "done": False,
                                     },
                                 }
@@ -3179,7 +3145,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"Used {page_tokens} tokens for this page.",
+                                    "description": f"Extracted {page_tokens} tokens from this page.",
                                     "done": False,
                                 },
                             }
@@ -3370,7 +3336,7 @@ class Tools:
                                 {
                                     "type": "status",
                                     "data": {
-                                        "description": f"Used {page_tokens} tokens for this page.",
+                                        "description": f"Extracted {page_tokens} tokens from this page.",
                                         "done": False,
                                     },
                                 }
@@ -3540,7 +3506,7 @@ class Tools:
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"Used {page_tokens} tokens for this page.",
+                                    "description": f"Extracted {page_tokens} tokens from this page.",
                                     "done": False,
                                 },
                             }
