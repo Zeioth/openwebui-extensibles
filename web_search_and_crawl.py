@@ -215,6 +215,17 @@ class Tools:
             default=0,
             description="Maximum tokens to use for the web search content response. Set to 0 for unlimited.",
         )
+        TOKEN_DECAY_ALPHA: float = Field(
+            default=0.5,
+            ge=0.0,
+            le=2.0,
+            title="Token Decay Aggressiveness",
+            description="Controls how fast the per‑page token limit decreases across crawled pages. "
+            "0 = no decay (same limit for all pages); "
+            "0.5 = square‑root decay (smooth); "
+            "1 = linear decay (1/page_number); "
+            "2 = quadratic decay (very aggressive).",
+        )
         LLM_BASE_URL: str = Field(
             title="LLM Base URL",
             default="https://openrouter.ai/api/v1",
@@ -2299,9 +2310,20 @@ class Tools:
             for i in range(0, len(gathered_urls), self.valves.CRAWL4AI_BATCH):
                 batch = gathered_urls[i : i + self.valves.CRAWL4AI_BATCH]
                 try:
+                    # Token budget with decay (uses self.content_counter + 1 because
+                    # counter will be incremented after this call)
+                    budget = None
+                    if self.valves.CRAWL4AI_MAX_TOKENS > 0:
+                        next_page = self.content_counter + 1
+                        budget = int(
+                            self.valves.CRAWL4AI_MAX_TOKENS
+                            / max(1, next_page**self.valves.TOKEN_DECAY_ALPHA)
+                        )
+
                     crawled_batch = await self._crawl_url(
                         urls=batch,
                         query=query,
+                        token_budget=budget,
                         skip_validation=True,
                         __event_emitter__=__event_emitter__,
                     )
@@ -2343,12 +2365,21 @@ class Tools:
                         content_str = orjson.dumps(normalized_data_list).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
 
-                        if (
-                            self.valves.CRAWL4AI_MAX_TOKENS > 0
-                            and page_tokens > self.valves.CRAWL4AI_MAX_TOKENS
-                        ):
+                        # Calculate effective token limit with decay (based on pages already processed)
+                        effective = 0
+                        if self.valves.CRAWL4AI_MAX_TOKENS > 0:
+                            # self.content_counter was already updated inside _crawl_url
+                            effective = int(
+                                self.valves.CRAWL4AI_MAX_TOKENS
+                                / max(
+                                    1,
+                                    self.content_counter**self.valves.TOKEN_DECAY_ALPHA,
+                                )
+                            )
+
+                        if effective > 0 and page_tokens > effective:
                             content_str = await self._truncate_content(
-                                content_str, self.valves.CRAWL4AI_MAX_TOKENS
+                                content_str, effective
                             )
                             try:
                                 normalized_data_list = orjson.loads(
@@ -2358,30 +2389,27 @@ class Tools:
                                 )
                             except Exception:
                                 pass
-                            page_tokens = self.valves.CRAWL4AI_MAX_TOKENS
+                            page_tokens = effective
 
-                        if (
-                            self.valves.CRAWL4AI_MAX_TOKENS > 0
-                            and total_tokens + page_tokens
-                            > self.valves.CRAWL4AI_MAX_TOKENS
-                        ):
-                            logger.warning(
-                                f"Reached token limit. Skipping remaining pages."
-                            )
-                            if __event_emitter__ and self.valves.MORE_STATUS:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"Token limit reached. Processed {len(crawl_results)} pages.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                            continue
-
+                        # No total cap – accumulate tokens freely
                         total_tokens += page_tokens
                         crawl_results.extend(normalized_data_list)
+
+                        # Log and notify actual tokens used for this batch
+                        if self.valves.DEBUG:
+                            logger.debug(
+                                f"Used {page_tokens} tokens for batch of {len(batch)} URL(s)."
+                            )
+                        if __event_emitter__ and self.valves.MORE_STATUS:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Used {page_tokens} tokens for this batch.",
+                                        "done": False,
+                                    },
+                                }
+                            )
 
                     batch_count += 1
 
@@ -2449,6 +2477,7 @@ class Tools:
         query: Optional[str] = None,
         extract_links: bool = False,
         skip_validation: bool = False,
+        token_budget: Optional[int] = None,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
         """
@@ -2543,6 +2572,15 @@ class Tools:
             await __event_emitter__(
                 {"type": "status", "data": {"description": description, "done": False}}
             )
+
+        # Notify token budget
+        if token_budget is not None:
+            msg = f"Allocated up to {token_budget} tokens for this page."
+            logger.debug(msg)
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {"type": "status", "data": {"description": msg, "done": False}}
+                )
 
         self.crawl_counter += len(urls)
 
@@ -2863,6 +2901,14 @@ class Tools:
 
                 crawled_pages.add(url)
 
+                # Token budget with decay
+                budget = None
+                if max_tokens > 0:
+                    budget = int(
+                        max_tokens
+                        / max(1, len(crawled_pages) ** self.valves.TOKEN_DECAY_ALPHA)
+                    )
+
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
@@ -2877,6 +2923,7 @@ class Tools:
                 result = await self._crawl_url(
                     urls=[url],
                     query=query,
+                    token_budget=budget,
                     extract_links=True,
                     skip_validation=True,
                     __event_emitter__=__event_emitter__,
@@ -2888,9 +2935,10 @@ class Tools:
                         content_str = orjson.dumps(normalized_content).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
 
-                        if max_tokens > 0 and page_tokens > max_tokens:
+                        effective = budget if budget else 0
+                        if effective > 0 and page_tokens > effective:
                             content_str = await self._truncate_content(
-                                content_str, max_tokens
+                                content_str, effective
                             )
                             try:
                                 normalized_content = orjson.loads(
@@ -2900,38 +2948,32 @@ class Tools:
                                 )
                             except Exception:
                                 pass
-                            page_tokens = max_tokens
+                            page_tokens = effective
 
-                        if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
-                            logger.warning(
-                                f"Token limit reached. Stopping research crawl."
+                        total_tokens += page_tokens
+                        crawled_results.extend(normalized_content)
+
+                        # Log and notify actual tokens used for this page
+                        if self.valves.DEBUG:
+                            logger.debug(f"Used {page_tokens} tokens for {url}.")
+                        if __event_emitter__ and self.valves.MORE_STATUS:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Used {page_tokens} tokens for this page.",
+                                        "done": False,
+                                    },
+                                }
                             )
-                            if __event_emitter__ and self.valves.MORE_STATUS:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"Token limit reached. Processed {len(crawled_results)} content items.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                            break
-                        else:
-                            total_tokens += page_tokens
-                            crawled_results.extend(normalized_content)
 
                 if result.get("images"):
                     all_images.extend(result["images"])
                 if result.get("videos"):
                     all_videos.extend(result["videos"])
 
-                if max_tokens > 0 and total_tokens >= max_tokens:
-                    break
-
                 if depth < max_depth:
                     for link in result.get("links", []):
-                        # Filter invalid URLs before adding to queue
                         if not self._is_valid_crawl_url(link):
                             if self.valves.DEBUG:
                                 logger.debug(
@@ -2951,9 +2993,6 @@ class Tools:
                         link_score = sum(1 for kw in keywords if kw in link.lower())
                         if link_score > 0:
                             queue.append((link, depth + 1, link_score))
-
-            if max_tokens > 0 and total_tokens >= max_tokens:
-                break
 
         if self.valves.DEBUG:
             logger.info(
@@ -3015,6 +3054,14 @@ class Tools:
 
             crawled_pages.add(current_url)
 
+            # Token budget with decay
+            budget = None
+            if max_tokens > 0:
+                budget = int(
+                    max_tokens
+                    / max(1, len(crawled_pages) ** self.valves.TOKEN_DECAY_ALPHA)
+                )
+
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
@@ -3029,6 +3076,7 @@ class Tools:
             result = await self._crawl_url(
                 urls=[current_url],
                 query=query,
+                token_budget=budget,
                 extract_links=True,
                 skip_validation=True,
                 __event_emitter__=__event_emitter__,
@@ -3039,9 +3087,10 @@ class Tools:
                     content_str = orjson.dumps(normalized_content).decode("utf-8")
                     page_tokens = await self._count_tokens(content_str)
 
-                    if max_tokens > 0 and page_tokens > max_tokens:
+                    effective = budget if budget else 0
+                    if effective > 0 and page_tokens > effective:
                         content_str = await self._truncate_content(
-                            content_str, max_tokens
+                            content_str, effective
                         )
                         try:
                             normalized_content = orjson.loads(
@@ -3051,38 +3100,34 @@ class Tools:
                             )
                         except Exception:
                             pass
-                        page_tokens = max_tokens
+                        page_tokens = effective
 
-                    if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
-                        logger.warning(f"Token limit reached. Stopping research crawl.")
-                        if __event_emitter__ and self.valves.MORE_STATUS:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": f"Token limit reached. Processed {len(crawled_results)} content items.",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                        break
-                    else:
-                        total_tokens += page_tokens
-                        crawled_results.extend(normalized_content)
+                    total_tokens += page_tokens
+                    crawled_results.extend(normalized_content)
+
+                    # Log and notify actual tokens used
+                    if self.valves.DEBUG:
+                        logger.debug(f"Used {page_tokens} tokens for {current_url}.")
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Used {page_tokens} tokens for this page.",
+                                    "done": False,
+                                },
+                            }
+                        )
 
             if result.get("images"):
                 all_images.extend(result["images"])
             if result.get("videos"):
                 all_videos.extend(result["videos"])
 
-            if max_tokens > 0 and total_tokens >= max_tokens:
-                break
-
             discovered_links = result.get("links", [])[:15]
             if not discovered_links:
                 continue
 
-            # Filter invalid URLs before processing
             discovered_links = [
                 link for link in discovered_links if self._is_valid_crawl_url(link)
             ]
@@ -3112,9 +3157,6 @@ class Tools:
             for link, _ in scored_links[:3]:
                 if link not in urls_to_process and link not in crawled_pages:
                     urls_to_process.append(link)
-
-            if max_tokens > 0 and total_tokens >= max_tokens:
-                break
 
         if self.valves.DEBUG:
             logger.info(
@@ -3188,6 +3230,14 @@ class Tools:
 
                 crawled_pages.add(url)
 
+                # Token budget with decay
+                budget = None
+                if max_tokens > 0:
+                    budget = int(
+                        max_tokens
+                        / max(1, len(crawled_pages) ** self.valves.TOKEN_DECAY_ALPHA)
+                    )
+
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
@@ -3202,8 +3252,9 @@ class Tools:
                 result = await self._crawl_url(
                     urls=[url],
                     query=query,
+                    token_budget=budget,
                     extract_links=True,
-                    skip_validation=True,  # ← already validated above by _validate_url_pipeline
+                    skip_validation=True,  # already validated above
                     __event_emitter__=__event_emitter__,
                 )
 
@@ -3213,9 +3264,10 @@ class Tools:
                         content_str = orjson.dumps(normalized_content).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
 
-                        if max_tokens > 0 and page_tokens > max_tokens:
+                        effective = budget if budget else 0
+                        if effective > 0 and page_tokens > effective:
                             content_str = await self._truncate_content(
-                                content_str, max_tokens
+                                content_str, effective
                             )
                             try:
                                 normalized_content = orjson.loads(
@@ -3225,38 +3277,32 @@ class Tools:
                                 )
                             except Exception:
                                 pass
-                            page_tokens = max_tokens
+                            page_tokens = effective
 
-                        if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
-                            logger.warning(
-                                f"Token limit reached. Stopping research crawl."
+                        total_tokens += page_tokens
+                        crawled_results.extend(normalized_content)
+
+                        # Log and notify actual tokens used
+                        if self.valves.DEBUG:
+                            logger.debug(f"Used {page_tokens} tokens for {url}.")
+                        if __event_emitter__ and self.valves.MORE_STATUS:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Used {page_tokens} tokens for this page.",
+                                        "done": False,
+                                    },
+                                }
                             )
-                            if __event_emitter__ and self.valves.MORE_STATUS:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"Token limit reached. Processed {len(crawled_results)} content items.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                            break
-                        else:
-                            total_tokens += page_tokens
-                            crawled_results.extend(normalized_content)
 
                 if result.get("images"):
                     all_images.extend(result["images"])
                 if result.get("videos"):
                     all_videos.extend(result["videos"])
 
-                if max_tokens > 0 and total_tokens >= max_tokens:
-                    break
-
                 if depth < max_depth:
                     for link in result.get("links", [])[:10]:
-                        # Filter invalid URLs before adding to queue
                         if not self._is_valid_crawl_url(link):
                             if self.valves.DEBUG:
                                 logger.debug(
@@ -3273,9 +3319,6 @@ class Tools:
                         ):
                             continue
                         queue.append((link, depth + 1))
-
-            if max_tokens > 0 and total_tokens >= max_tokens:
-                break
 
         if self.valves.DEBUG:
             logger.info(
@@ -3341,6 +3384,14 @@ class Tools:
             # Count this page as attempted (like the other research strategies)
             results["total_pages"] += 1
 
+            # Token budget with decay
+            budget = None
+            if max_tokens > 0:
+                budget = int(
+                    max_tokens
+                    / max(1, results["total_pages"] ** self.valves.TOKEN_DECAY_ALPHA)
+                )
+
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
@@ -3358,6 +3409,7 @@ class Tools:
             source_result = await self._crawl_url(
                 urls=[source_url],
                 query=query,
+                token_budget=budget,
                 skip_validation=True,  # already validated above
                 __event_emitter__=__event_emitter__,
             )
@@ -3368,9 +3420,11 @@ class Tools:
                     content_str = orjson.dumps(normalized_content).decode("utf-8")
                     page_tokens = await self._count_tokens(content_str)
 
-                    if max_tokens > 0 and page_tokens > max_tokens:
+                    # Truncate using the same budget
+                    effective = budget if budget else 0
+                    if effective > 0 and page_tokens > effective:
                         content_str = await self._truncate_content(
-                            content_str, max_tokens
+                            content_str, effective
                         )
                         try:
                             normalized_content = orjson.loads(
@@ -3380,46 +3434,38 @@ class Tools:
                             )
                         except Exception:
                             pass
-                        page_tokens = max_tokens
+                        page_tokens = effective
 
-                    if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
-                        logger.warning("Token limit reached. Stopping research crawl.")
-                        if __event_emitter__ and self.valves.MORE_STATUS:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": (
-                                            f"Token limit reached. Processed "
-                                            f"{results['total_pages']} pages."
-                                        ),
-                                        "done": False,
-                                    },
-                                }
-                            )
-                        break
-                    else:
-                        total_tokens += page_tokens
-                        relevance_score = sum(
-                            1
-                            for kw in keywords
-                            if kw in str(normalized_content).lower()
+                    total_tokens += page_tokens
+
+                    # Log and notify actual tokens used
+                    if self.valves.DEBUG:
+                        logger.debug(f"Used {page_tokens} tokens for {source_url}.")
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Used {page_tokens} tokens for this page.",
+                                    "done": False,
+                                },
+                            }
                         )
-                        results["sources"][source_url] = {
-                            "content": normalized_content,
-                            "relevance_score": relevance_score,
-                            "links": source_result.get("links", [])[:10],
-                        }
-                        results["content"].extend(normalized_content)
+
+                    relevance_score = sum(
+                        1 for kw in keywords if kw in str(normalized_content).lower()
+                    )
+                    results["sources"][source_url] = {
+                        "content": normalized_content,
+                        "relevance_score": relevance_score,
+                        "links": source_result.get("links", [])[:10],
+                    }
+                    results["content"].extend(normalized_content)
                 else:
-                    # Even if no usable normalized content, we still count the page as attempted
                     pass
 
             results["images"].extend(source_result.get("images", []))
             results["videos"].extend(source_result.get("videos", []))
-
-            if max_tokens > 0 and total_tokens >= max_tokens:
-                break
 
             # Discover and follow promising links from this source
             scored_links = []
@@ -3445,8 +3491,6 @@ class Tools:
                     or crawled_links_from_source >= 3
                 ):
                     break
-                if max_tokens > 0 and total_tokens >= max_tokens:
-                    break
                 if not include_external:
                     parsed_link = urlparse(link)
                     parsed_source = urlparse(source_url)
@@ -3469,6 +3513,16 @@ class Tools:
                 # Count this follow-up page as attempted
                 results["total_pages"] += 1
 
+                # Token budget for this link
+                budget = None
+                if max_tokens > 0:
+                    budget = int(
+                        max_tokens
+                        / max(
+                            1, results["total_pages"] ** self.valves.TOKEN_DECAY_ALPHA
+                        )
+                    )
+
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
@@ -3486,6 +3540,7 @@ class Tools:
                 link_result = await self._crawl_url(
                     urls=[link],
                     query=query,
+                    token_budget=budget,
                     skip_validation=True,
                     __event_emitter__=__event_emitter__,
                 )
@@ -3500,9 +3555,10 @@ class Tools:
                         )
                         page_tokens = await self._count_tokens(content_str)
 
-                        if max_tokens > 0 and page_tokens > max_tokens:
+                        effective = budget if budget else 0
+                        if effective > 0 and page_tokens > effective:
                             content_str = await self._truncate_content(
-                                content_str, max_tokens
+                                content_str, effective
                             )
                             try:
                                 normalized_link_content = orjson.loads(
@@ -3512,36 +3568,14 @@ class Tools:
                                 )
                             except Exception:
                                 pass
-                            page_tokens = max_tokens
+                            page_tokens = effective
 
-                        if max_tokens > 0 and total_tokens + page_tokens > max_tokens:
-                            logger.warning(
-                                "Token limit reached. Stopping research crawl."
-                            )
-                            if __event_emitter__ and self.valves.MORE_STATUS:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": (
-                                                f"Token limit reached. Processed "
-                                                f"{results['total_pages']} pages."
-                                            ),
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                            break
-                        else:
-                            total_tokens += page_tokens
-                            results["content"].extend(normalized_link_content)
-                            crawled_links_from_source += 1
+                        total_tokens += page_tokens
+                        results["content"].extend(normalized_link_content)
+                        crawled_links_from_source += 1
 
                 results["images"].extend(link_result.get("images", []))
                 results["videos"].extend(link_result.get("videos", []))
-
-            if max_tokens > 0 and total_tokens >= max_tokens:
-                break
 
         # Final normalisation and sorting (unchanged)
         results["content"] = self._normalize_content(results["content"])
