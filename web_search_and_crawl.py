@@ -2750,6 +2750,21 @@ class Tools:
                         }
                     )
 
+            # After processing results, notify if nothing was extracted
+            if not results:
+                if self.valves.DEBUG:
+                    logger.debug(f"No content extracted from {urls}.")
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "No content extracted from this page.",
+                                "done": False,
+                            },
+                        }
+                    )
+
             self.content_counter += len(results)
             if __event_emitter__ and self.valves.MORE_STATUS:
                 s = "s" if self.content_counter > 1 else ""
@@ -2966,6 +2981,20 @@ class Tools:
                                     },
                                 }
                             )
+                else:
+                    # Notify that nothing was extracted
+                    if self.valves.DEBUG:
+                        logger.debug(f"No content extracted from {url}.")
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": "No content extracted from this page.",
+                                    "done": False,
+                                },
+                            }
+                        )
 
                 if result.get("images"):
                     all_images.extend(result["images"])
@@ -3118,6 +3147,20 @@ class Tools:
                                 },
                             }
                         )
+            else:
+                # Notify that no content was extracted
+                if self.valves.DEBUG:
+                    logger.debug(f"No content extracted from {current_url}.")
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "No content extracted from this page.",
+                                "done": False,
+                            },
+                        }
+                    )
 
             if result.get("images"):
                 all_images.extend(result["images"])
@@ -3295,6 +3338,20 @@ class Tools:
                                     },
                                 }
                             )
+                else:
+                    # Notify that no content was extracted
+                    if self.valves.DEBUG:
+                        logger.debug(f"No content extracted from {url}.")
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": "No content extracted from this page.",
+                                    "done": False,
+                                },
+                            }
+                        )
 
                 if result.get("images"):
                     all_images.extend(result["images"])
@@ -3464,6 +3521,21 @@ class Tools:
                 else:
                     pass
 
+            else:
+                # Notify that no content was extracted from this source
+                if self.valves.DEBUG:
+                    logger.debug(f"No content extracted from {source_url}.")
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "No content extracted from this page.",
+                                "done": False,
+                            },
+                        }
+                    )
+
             results["images"].extend(source_result.get("images", []))
             results["videos"].extend(source_result.get("videos", []))
 
@@ -3573,6 +3645,20 @@ class Tools:
                         total_tokens += page_tokens
                         results["content"].extend(normalized_link_content)
                         crawled_links_from_source += 1
+                else:
+                    # Notify that no content was extracted from this link
+                    if self.valves.DEBUG:
+                        logger.debug(f"No content extracted from {link}.")
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": "No content extracted from this page.",
+                                    "done": False,
+                                },
+                            }
+                        )
 
                 results["images"].extend(link_result.get("images", []))
                 results["videos"].extend(link_result.get("videos", []))
