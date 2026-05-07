@@ -1358,7 +1358,7 @@ class Tools:
 
         is_ollama = "ollama" in base_url.lower() or ":11434" in base_url
 
-        def _make_request():
+        def _blocking():
             if is_ollama:
                 ollama_url = f"{base_url}/api/generate"
                 payload = {
@@ -1366,14 +1366,26 @@ class Tools:
                     "prompt": prompt,
                     "system": system,
                     "stream": False,
-                    "options": {"temperature": temperature, "num_predict": max_tokens},
+                    "options": {
+                        "temperature": temperature,
+                        "num_predict": max_tokens,
+                    },
                 }
                 resp = requests.post(ollama_url, json=payload, timeout=timeout)
                 if resp.status_code != 200:
                     raise RuntimeError(
                         f"Ollama error {resp.status_code}: {resp.text[:200]}"
                     )
-                return resp.json().get("response", "")
+                resp_json = resp.json()
+                if "error" in resp_json:
+                    logger.error(f"Ollama model error: {resp_json['error']}")
+                    return ""
+                response_text = resp_json.get("response", "")
+                if not response_text.strip():
+                    logger.warning(
+                        f"Ollama returned empty response. Full JSON: {resp_json}"
+                    )
+                return response_text
             else:
                 headers = {"Content-Type": "application/json"}
                 if api_token:
@@ -1399,7 +1411,15 @@ class Tools:
                     )
                 return resp.json()["choices"][0]["message"]["content"]
 
-        content = await anyio.to_thread.run_sync(_make_request)
+        content = await anyio.to_thread.run_sync(_blocking)
+
+        if not content or not content.strip():
+            logger.warning(f"LLM call returned empty content for model '{model_str}'.")
+            return ""
+
+        if self.valves.DEBUG:
+            logger.debug(f"LLM call raw response (first 300 chars): {content[:300]}")
+
         return content
 
     # endregion
@@ -1443,45 +1463,22 @@ class Tools:
                 }
             )
 
-        prompt = f"""You are a disambiguation expert. Given the user query, identify homonyms (alternative meanings) that should be AVOIDED when searching for the main concept.
-
-User query: "{query}"
-
-Output format:
-// Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
-// (If no homonyms, write "none")
-
-Return ONLY the comment line, nothing else.
+        prompt = f"""List homonyms (alternative meanings) that must be avoided when searching for: "{query}"
+If none, return an empty array.
+Output ONLY a JSON array of strings. Example: ["fresadora", "fresa dental"]
 """
+        system_msg = "Return only a JSON array of homonyms. No other text."
 
         try:
-            # Use the main LLM provider (or a cheaper one if specified elsewhere)
             provider = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
             content = await self._call_llm(
                 prompt=prompt,
-                system="You are a precise homonym detector. Respond only with the requested comment format.",
+                system=system_msg,
                 provider=provider,
-                temperature=0.1,
-                max_tokens=150,
-                timeout=30,
+                temperature=0.2,
+                max_tokens=4000,
+                timeout=300,
             )
-            homonyms = self._extract_homonyms_from_llm_response(content)
-
-            tokens_used = await self._estimate_llm_call_tokens(prompt, content)
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"🔍 Homonym detection used {tokens_used} tokens.",
-                            "done": False,
-                        },
-                    }
-                )
-            if self.valves.DEBUG:
-                logger.info(f"Homonym detection consumed {tokens_used} tokens.")
-            return homonyms
-
         except Exception as e:
             logger.error(f"Homonym detection error: {e}")
             if __event_emitter__:
@@ -1495,6 +1492,60 @@ Return ONLY the comment line, nothing else.
                     }
                 )
             return []
+
+        import json
+
+        if content:
+            content = re.sub(r"```(?:json)?\s*", "", content)
+            content = re.sub(r"```", "", content)
+            brace_idx = content.find("[")
+            if brace_idx != -1:
+                content = content[brace_idx:]
+            last_brace = content.rfind("]")
+            if last_brace != -1:
+                content = content[: last_brace + 1]
+            content = content.strip()
+
+        if not content:
+            logger.warning("Homonym detection: empty content")
+            return []
+
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                homonyms = [
+                    h.strip().lower()
+                    for h in parsed
+                    if h.strip().lower() not in ("none", "ninguno", "n/a", "-")
+                ]
+            else:
+                homonyms = parsed.get("homonyms", [])
+        except json.JSONDecodeError:
+            homonyms = self._extract_homonyms_from_llm_response(content)
+            if self.valves.DEBUG:
+                logger.info("Homonym detection fell back to comment parsing")
+
+        if self.valves.DEBUG:
+            logger.info(f"Homonyms detected: {homonyms}")
+
+        try:
+            tokens_used = await self._estimate_llm_call_tokens(prompt, content)
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🔍 Homonym detection used {tokens_used} tokens.",
+                            "done": False,
+                        },
+                    }
+                )
+            if self.valves.DEBUG:
+                logger.info(f"Homonym detection consumed {tokens_used} tokens.")
+        except Exception:
+            pass
+
+        return homonyms
 
     async def _expand_query_with_llm(
         self,
@@ -1518,41 +1569,25 @@ Return ONLY the comment line, nothing else.
                 }
             )
 
-        prompt = f"""You are a search query expansion expert. Your task is to generate search terms that preserve the EXACT intended meaning of the original query, including any disambiguation.
-    
-    Original query: "{query}"
-    
-    **Step 1 — Identify the core concept:**
-    Before generating any terms, explicitly state:
-    - What is the EXACT meaning of the key subject in this query? (not a category, the specific thing)
-    - Are there homonyms or other meanings for this word that must be AVOIDED?
-    
-    **Step 2 — Generate {self.valves.MAX_EXPANDED_QUERIES} search terms following these rules:**
-    - Every term MUST be about the identical concept identified in Step 1
-    - Include: synonyms, scientific names, alternative phrasings, specific subtopics
-    - Each term must contain enough context words to disambiguate from homonyms
-      (e.g., if the subject has multiple meanings, add a disambiguating word)
-    - Keep terms under 10 words each
-    - NEVER generate terms that are a broader category (e.g., "fruit" alone)
-    - NEVER generate terms about a different meaning of the same word
-    
-    **Output format:**
-    First output your Step 1 analysis as comments, then output ONLY a JSON list:
-    // Core concept: [your analysis here]
-    // Homonyms to avoid: [comma-separated list, e.g. "fresadora, fresa dental, fresa color"]
-    ["term 1", "term 2", ...]
-    
-    """
+        prompt = f"""You are a search query expander. Given the original query, generate {self.valves.MAX_EXPANDED_QUERIES} related search terms. Each term must stay under 10 words and include disambiguating context if the subject is ambiguous.
+
+Original query: "{query}"
+
+Output ONLY a JSON array of strings. Example: ["fresa fruta clasificación", "Fragaria ananassa taxonomía", "tipos de fresas especies"]
+
+Now output your JSON array:
+"""
+        system_msg = "You only output a JSON array of strings. No other text."
 
         try:
             provider = self.valves.EXPANSION_LLM_PROVIDER or self.valves.LLM_PROVIDER
             content = await self._call_llm(
                 prompt=prompt,
-                system="You are a precise search query expander. Respond only with the requested format: comments then JSON list.",
+                system=system_msg,
                 provider=provider,
-                temperature=0.3,
-                max_tokens=700,
-                timeout=120,
+                temperature=0.2,
+                max_tokens=4000,
+                timeout=300,
             )
         except Exception as e:
             logger.error(f"Query expansion error: {e}")
@@ -1570,25 +1605,78 @@ Return ONLY the comment line, nothing else.
 
         import json
 
-        # Extract homonyms from Step 1 comment and store for use by URL filter
-        self._detected_homonyms = self._extract_homonyms_from_llm_response(content)
+        if content:
+            content = re.sub(r"```(?:json)?\s*", "", content)
+            content = re.sub(r"```", "", content)
+            brace_idx = content.find("[")
+            if brace_idx != -1:
+                content = content[brace_idx:]
+            last_brace = content.rfind("]")
+            if last_brace != -1:
+                content = content[: last_brace + 1]
+            content = content.strip()
 
-        json_match = re.search(r"\[.*\]", content, re.DOTALL)
-        if json_match:
-            related_queries = json.loads(json_match.group())
-            if isinstance(related_queries, list):
-                related_queries = [
-                    str(q).strip() for q in related_queries if q and str(q).strip()
-                ]
-                all_queries = [query]
-                for q in related_queries[: self.valves.MAX_EXPANDED_QUERIES]:
-                    if q and q.lower() != query.lower() and q not in all_queries:
-                        all_queries.append(q)
+        if not content:
+            logger.warning(
+                "Query expansion: LLM returned empty content after cleaning."
+            )
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "⚠️ Could not parse expanded queries. Using original query.",
+                            "done": False,
+                        },
+                    }
+                )
+            return [query]
 
-                if self.valves.DEBUG:
-                    logger.info(f"Query expansion: {query} -> {all_queries}")
+        related_queries = None
 
-                # ── Token reporting ──
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                related_queries = parsed
+            elif isinstance(parsed, dict) and "queries" in parsed:
+                related_queries = parsed["queries"]
+        except json.JSONDecodeError:
+            arr_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if arr_match:
+                try:
+                    related_queries = json.loads(arr_match.group())
+                except json.JSONDecodeError:
+                    pass
+
+        if related_queries is None:
+            logger.warning(
+                f"Query expansion: could not parse JSON. Raw (cleaned) first 500 chars: {content[:500]}"
+            )
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "⚠️ Could not parse expanded queries. Using original query.",
+                            "done": False,
+                        },
+                    }
+                )
+            return [query]
+
+        if isinstance(related_queries, list):
+            related_queries = [
+                str(q).strip() for q in related_queries if q and str(q).strip()
+            ]
+            all_queries = [query]
+            for q in related_queries[: self.valves.MAX_EXPANDED_QUERIES]:
+                if q and q.lower() != query.lower() and q not in all_queries:
+                    all_queries.append(q)
+
+            if self.valves.DEBUG:
+                logger.info(f"Query expansion: {query} -> {all_queries}")
+
+            try:
                 tokens_used = await self._estimate_llm_call_tokens(prompt, content)
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
@@ -1604,23 +1692,24 @@ Return ONLY the comment line, nothing else.
                     logger.info(
                         f"Query expansion LLM call consumed {tokens_used} tokens."
                     )
+            except Exception:
+                pass
 
-                # ── N terms generated report ──
-                if __event_emitter__ and self.valves.MORE_STATUS:
-                    queries_display = "\n".join([f"  • {q}" for q in all_queries[1:]])
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"🔍 Will search using {len(all_queries)} terms (including original)",
-                                "done": False,
-                            },
-                        }
-                    )
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                queries_display = "\n".join([f"  • {q}" for q in all_queries[1:]])
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🔍 Will search using {len(all_queries)} terms (including original)",
+                            "done": False,
+                        },
+                    }
+                )
 
-                return all_queries
+            return all_queries
 
-        logger.warning("Query expansion: LLM response did not contain valid JSON")
+        logger.warning("Query expansion: extracted queries not a list")
         if __event_emitter__:
             await __event_emitter__(
                 {
@@ -1631,7 +1720,6 @@ Return ONLY the comment line, nothing else.
                     },
                 }
             )
-
         return [query]
 
     async def _search_all_queries(
@@ -1743,7 +1831,7 @@ Return ONLY the comment line, nothing else.
         """Filter URLs using LLM for semantic relevance.
         Uses FILTER_LLM_PROVIDER valve (falls back to LLM_PROVIDER).
         """
-        import json  # At top so it's always defined
+        import json
 
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
@@ -1754,7 +1842,7 @@ Return ONLY the comment line, nothing else.
                 query, __event_emitter__
             )
 
-        # 2. Apply homonym pre-filter (this may reduce the URL list)
+        # 2. Homonym pre-filter (unchanged)
         detected = getattr(self, "_detected_homonyms", [])
         if detected:
             pre_filtered = []
@@ -1810,6 +1898,7 @@ Return ONLY the comment line, nothing else.
         if not urls:
             return []
 
+        # Fetch titles (unchanged)
         url_titles = {}
 
         async def fetch_title(url: str) -> tuple[str, str]:
@@ -1827,8 +1916,7 @@ Return ONLY the comment line, nothing else.
                                 r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE
                             )
                             if title_match:
-                                title = title_match.group(1).strip()[:200]
-                                return url, title
+                                return url, title_match.group(1).strip()[:200]
             except Exception as e:
                 if self.valves.DEBUG:
                     logger.debug(f"Could not fetch title for {url}: {e}")
@@ -1839,66 +1927,41 @@ Return ONLY the comment line, nothing else.
         for url, title in results:
             url_titles[url] = title
 
-        # Build homonym context from expansion step if available
+        # Simplified prompt: ask for a flat array of decisions
         homonym_context = ""
         if detected:
             homonym_list = ", ".join(detected)
             homonym_context = f"\nPre-detected homonyms (MUST REJECT pages about these): {homonym_list}\n"
 
-        prompt = f"""You are a semantic URL filter. Your task is to determine if a URL is about the EXACT SAME CONCEPT as the user's query.
-        
-        USER QUERY: "{query}"
-        
-        == DISAMBIGUATION STEP (REQUIRED - do this before evaluating any URL) ==
-        
-        The query may contain ambiguous words. Based on the FULL CONTEXT of the query:
-        
-        1. Identify the INTENDED meaning of key terms
-        2. List alternative meanings (homonyms) that should be REJECTED
-        3. State the core concept in a clear, unambiguous phrase
-        
-        Example:
-        Query: "clasificacion de tipos de fresa (fruta)"
-        → Intended: Fruit (strawberry) classification/taxonomy
-        → Reject: Dental burs, milling cutters, strawberry plant morphology only (without fruit classification)
-        
-        == EVALUATION RULES ==
-        
-        For each URL, apply this reasoning:
-        - Does the page content match the INTENDED meaning identified above?
-        - Does it contain terms from the REJECT list? → REJECT if yes
-        - If the query explicitly includes a disambiguator like "(fruta)", "(fruit)", "(dental)", etc., RESPECT IT
-        
-        REJECT when:
-        - The URL is about a homonym/alternative meaning
-        - The URL is a disambiguation page, category, portal, or "List of..."
-        - You are uncertain (false negative is better than crawling irrelevant content)
-                
-        == OUTPUT ==
-        
-        Return ONLY a JSON list:
-        [{{"index":1,"decision":"KEEP"}},{{"index":2,"decision":"REJECT"}}]
-        
-        URLs to evaluate:
-        """
-        for idx, url in enumerate(urls, 1):
-            title = url_titles.get(url, "No title available")
-            prompt += f"{idx}. URL: {url}\n   Title: {title}\n"
+        prompt = f"""You are a URL relevance filter. For each URL, decide KEEP or REJECT based on whether it is about the exact concept of the query.
 
-        filtered_urls = urls  # default
-        filter_success = False  # Track if the LLM call actually succeeded
+Query: "{query}"
+{homonym_context}
+Rules:
+- KEEP only if the URL is clearly about the intended meaning.
+- REJECT if it's about a homonym, disambiguation page, category portal, or not clearly relevant.
+
+Output ONLY a JSON array of decision objects. Example:
+[{{"index":1,"decision":"KEEP"}},{{"index":2,"decision":"REJECT"}}]
+
+Now evaluate these URLs:
+"""
+        for idx, url in enumerate(urls, 1):
+            prompt += f"{idx}. {url} — Title: {url_titles.get(url, 'N/A')}\n"
+
+        filtered_urls = urls  # fallback
+        content = ""
 
         try:
             provider = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
             content = await self._call_llm(
                 prompt=prompt,
-                system="You are a precise URL relevance filter. Respond only with the requested JSON format.",
+                system="Return only a JSON array of decisions. No other text.",
                 provider=provider,
-                temperature=0.1,
-                max_tokens=2000,
-                timeout=120,
+                temperature=0.2,
+                max_tokens=8000,
+                timeout=300,
             )
-            filter_success = True
         except Exception as e:
             logger.error(f"LLM URL filter error: {e}\n{traceback.format_exc()}")
             if __event_emitter__:
@@ -1911,43 +1974,68 @@ Return ONLY the comment line, nothing else.
                         },
                     }
                 )
-            # filter_success remains False, filtered_urls stays as urls
+            return filtered_urls
 
-        # ── JSON parsing and status messages (only if LLM call succeeded) ──
-        if filter_success:
-            # 1. Parse JSON decisions to compute kept/rejected counts
-            json_match = re.search(r"\[.*\]", content, re.DOTALL)
-            if json_match:
-                decisions = json.loads(json_match.group())
-                keep_indices = {
-                    item["index"] - 1
-                    for item in decisions
-                    if item.get("decision") == "KEEP"
-                }
-                filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
-                if self.valves.DEBUG:
-                    logger.info(
-                        f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
-                    )
-            else:
-                logger.warning("LLM URL filter: no valid JSON array in response")
-                # filtered_urls remains the original list (already set before try block)
-
-            # 2. Emit summary of kept/rejected URLs
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                rejected = len(urls) - len(filtered_urls)
-                if rejected > 0:
-                    description = f"🧠 LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
-                else:
-                    description = f"🧠 LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
+        if not content or not content.strip():
+            logger.warning("LLM URL filter: empty response, using all URLs")
+            if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
-                        "data": {"description": description, "done": False},
+                        "data": {
+                            "description": "⚠️ Filter LLM returned empty response. Using all URLs.",
+                            "done": False,
+                        },
                     }
                 )
+            return filtered_urls
 
-            # 3. Emit token usage (after the summary)
+        # ── Clean response ───────────────────────────────────────────────
+        content = re.sub(r"```(?:json)?\s*", "", content)
+        content = re.sub(r"```", "", content)
+        # Try to extract array
+        brace_idx = content.find("[")
+        if brace_idx != -1:
+            content = content[brace_idx:]
+        last_brace = content.rfind("]")
+        if last_brace != -1:
+            content = content[: last_brace + 1]
+
+        decisions = []
+        try:
+            parsed = json.loads(content)
+            if isinstance(parsed, list):
+                decisions = parsed
+            elif isinstance(parsed, dict):
+                decisions = parsed.get("decisions", [])
+        except json.JSONDecodeError:
+            json_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if json_match:
+                try:
+                    decisions = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    pass
+
+        if decisions and isinstance(decisions, list):
+            keep_indices = {
+                item["index"] - 1
+                for item in decisions
+                if isinstance(item, dict) and item.get("decision") == "KEEP"
+            }
+            filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
+            if self.valves.DEBUG:
+                logger.info(
+                    f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
+                )
+        else:
+            logger.warning(
+                "LLM URL filter: could not extract decisions, using all URLs"
+            )
+            if self.valves.DEBUG:
+                logger.debug(f"Raw filter response (cleaned): {content[:500]}")
+
+        # Token usage
+        try:
             tokens_used = await self._estimate_llm_call_tokens(prompt, content)
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
@@ -1961,6 +2049,19 @@ Return ONLY the comment line, nothing else.
                 )
             if self.valves.DEBUG:
                 logger.info(f"LLM URL filter call consumed {tokens_used} tokens.")
+        except Exception:
+            pass
+
+        rejected = len(urls) - len(filtered_urls)
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            desc = (
+                f"🧠 LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
+                if rejected > 0
+                else f"🧠 LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
+            )
+            await __event_emitter__(
+                {"type": "status", "data": {"description": desc, "done": False}}
+            )
 
         return filtered_urls
 
@@ -2138,7 +2239,7 @@ Return ONLY the comment line, nothing else.
         """
         Main entry point for web search and crawl.
         """
-        start_time = time.time()  # Record start time for elapsed measurement
+        start_time = time.time()
         logger.info(f"Starting search and crawl for '{query}'")
 
         gathered_urls = []
@@ -2180,7 +2281,6 @@ Return ONLY the comment line, nothing else.
                 }
             )
 
-        # Expansion and filtering now use dedicated valves (no auto-detection)
         search_queries = await self._expand_query_with_llm(query, __event_emitter__)
         search_urls = await self._search_all_queries(
             search_queries, __event_emitter__, __user__
@@ -2190,8 +2290,7 @@ Return ONLY the comment line, nothing else.
             if url not in gathered_urls:
                 gathered_urls.append(url)
 
-        # Remove Wikipedia articles that appear in multiple languages,
-        # keeping only the most relevant version (user language preferred).
+        # Deduplicate Wikipedia URLs
         before_dedup = len(gathered_urls)
         gathered_urls = await self._deduplicate_wikipedia_urls(gathered_urls, __user__)
         after_dedup = len(gathered_urls)
@@ -2273,12 +2372,10 @@ Return ONLY the comment line, nothing else.
                 logger.info(f"Search and crawl finished in {elapsed_str}")
                 return f"No relevant URLs were found for the query: {query}."
 
-        # Separamos las URLs proporcionadas por el usuario de las de búsqueda
+        # Prioritize user-provided URLs
         search_only_urls = [
             url for url in gathered_urls if url not in user_provided_urls
         ]
-
-        # Unimos las URLs del usuario primero, luego las de búsqueda (en orden original)
         gathered_urls = user_provided_urls + search_only_urls
 
         max_urls = self.user_valves.CRAWL4AI_MAX_URLS or self.valves.CRAWL4AI_MAX_URLS
@@ -2322,7 +2419,6 @@ Return ONLY the comment line, nothing else.
                 )
 
         crawl_results = []
-        batch_count = 1
         image_list = []
         video_list = []
         seen_images = set()
@@ -2379,7 +2475,6 @@ Return ONLY the comment line, nothing else.
                 video_list.extend(research_result["videos"])
 
         else:
-            # Validate ALL URLs once before batching
             gathered_urls = await self._validate_url_pipeline(
                 gathered_urls,
                 query,
@@ -2390,8 +2485,6 @@ Return ONLY the comment line, nothing else.
             for i in range(0, len(gathered_urls), self.valves.CRAWL4AI_BATCH):
                 batch = gathered_urls[i : i + self.valves.CRAWL4AI_BATCH]
                 try:
-                    # Token budget with decay (uses self.content_counter + 1 because
-                    # counter will be incremented after this call)
                     budget = None
                     if self.valves.CRAWL4AI_MAX_TOKENS > 0:
                         next_page = self.content_counter + 1
@@ -2407,13 +2500,6 @@ Return ONLY the comment line, nothing else.
                         skip_validation=True,
                         __event_emitter__=__event_emitter__,
                     )
-
-                    if self.valves.DEBUG:
-                        logger.info(
-                            f"Found {len(crawled_batch.get('content', []))} content, "
-                            f"{len(crawled_batch.get('images', []))} images, "
-                            f"{len(crawled_batch.get('videos', []))} videos."
-                        )
 
                     for img_url in crawled_batch.get("images", []):
                         parsed_image = urlparse(img_url)
@@ -2445,10 +2531,8 @@ Return ONLY the comment line, nothing else.
                         content_str = orjson.dumps(normalized_data_list).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
 
-                        # Calculate effective token limit with decay (based on pages already processed)
                         effective = 0
                         if self.valves.CRAWL4AI_MAX_TOKENS > 0:
-                            # self.content_counter was already updated inside _crawl_url
                             effective = int(
                                 self.valves.CRAWL4AI_MAX_TOKENS
                                 / max(
@@ -2471,11 +2555,9 @@ Return ONLY the comment line, nothing else.
                                 pass
                             page_tokens = effective
 
-                        # No total cap – accumulate tokens freely
                         total_tokens += page_tokens
                         crawl_results.extend(normalized_data_list)
 
-                        # Log and notify actual tokens used for this batch
                         if self.valves.DEBUG:
                             logger.debug(
                                 f"Used {page_tokens} tokens for batch of {len(batch)} URL(s)."
@@ -2490,8 +2572,6 @@ Return ONLY the comment line, nothing else.
                                     },
                                 }
                             )
-
-                    batch_count += 1
 
                 except Exception as e:
                     logger.error(
