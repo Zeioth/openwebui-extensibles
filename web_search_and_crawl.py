@@ -2192,7 +2192,23 @@ Return ONLY the comment line, nothing else.
 
         # Remove Wikipedia articles that appear in multiple languages,
         # keeping only the most relevant version (user language preferred).
+        before_dedup = len(gathered_urls)
         gathered_urls = await self._deduplicate_wikipedia_urls(gathered_urls, __user__)
+        after_dedup = len(gathered_urls)
+        if (
+            before_dedup != after_dedup
+            and __event_emitter__
+            and self.valves.MORE_STATUS
+        ):
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"🌐 Deduplicated Wikipedia URLs: removed {before_dedup - after_dedup} duplicate language variant{'s' if before_dedup - after_dedup != 1 else ''}.",
+                        "done": False,
+                    },
+                }
+            )
 
         if not gathered_urls:
             if __event_emitter__:
