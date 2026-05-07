@@ -2194,9 +2194,6 @@ Return ONLY the comment line, nothing else.
         # keeping only the most relevant version (user language preferred).
         gathered_urls = await self._deduplicate_wikipedia_urls(gathered_urls, __user__)
 
-        if max_results and max_results > 0 and len(gathered_urls) > max_results:
-            gathered_urls = gathered_urls[:max_results]
-
         if not gathered_urls:
             if __event_emitter__:
                 await __event_emitter__(
