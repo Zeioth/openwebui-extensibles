@@ -24,6 +24,8 @@ import asyncio
 import uuid
 import hashlib
 import numpy as np
+import threading
+import torch
 from urllib.parse import parse_qs, urlparse, quote
 from pydantic import BaseModel, Field
 from typing import Any, List, Optional, Union, Callable, Literal, Tuple
@@ -495,6 +497,7 @@ class Tools:
         self._cache_locks: dict[str, asyncio.Lock] = {}
 
         self._embedder = None
+        self._embedder_lock = threading.Lock()
         self._chroma_client = None
         self._cache_collection = None
         self._validation_session: Optional[aiohttp.ClientSession] = None
@@ -586,11 +589,17 @@ class Tools:
 
     def _get_embedder(self):
         if self._embedder is None:
-            try:
-                self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-            except Exception as e:
-                logger.error(f"Failed to load SentenceTransformer: {e}")
-                raise
+            with self._embedder_lock:
+                if self._embedder is None:
+                    try:
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        self._embedder = SentenceTransformer(
+                            "all-MiniLM-L6-v2", device=device
+                        )
+                        logger.info(f"Embedder model loaded on {device}")
+                    except Exception as e:
+                        logger.error(f"Failed to load SentenceTransformer: {e}")
+                        raise
         return self._embedder
 
     def _get_chroma_client(self):
