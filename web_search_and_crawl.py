@@ -22,6 +22,7 @@ import aiohttp
 import time
 import asyncio
 import uuid
+import hashlib
 import numpy as np
 from urllib.parse import parse_qs, urlparse, quote
 from pydantic import BaseModel, Field
@@ -1217,8 +1218,8 @@ class Tools:
         except KeyError:
             encoding = tiktoken.get_encoding("cl100k_base")
 
-        # split into sentences
-        sentences = re.split(r"(?<=[.!?])\s+", text)
+        # split into sentences (support Spanish ¿, ¡, …, etc.)
+        sentences = re.split(r"(?<=[.!?¿¡…])\s+", text)
         chunks = []
         current_chunk = []
         current_tokens = 0
@@ -1237,29 +1238,48 @@ class Tools:
 
         return chunks
 
-    def _cache_page(self, url: str, markdown: Any):
+    async def _cache_page(self, url: str, markdown: Any):
         """Store page chunks with embeddings and timestamp in the persistent collection."""
-        # Ensure markdown is a string; if it's a dict, try to extract a text representation
+        # Only cache if markdown is a non-empty string; otherwise skip silently
         if not isinstance(markdown, str):
             if isinstance(markdown, dict):
-                # Try common keys that might contain the markdown text
+                # Try to extract a meaningful string from known keys
                 for key in ("markdown", "raw_markdown", "fit_markdown", "text"):
                     if key in markdown and isinstance(markdown[key], str):
                         markdown = markdown[key]
                         break
                 else:
-                    # Fallback: convert the whole dict to a string (not ideal, but prevents crash)
-                    markdown = str(markdown)
+                    logger.warning(
+                        f"Skipping cache for {url}: markdown is dict without known text keys"
+                    )
+                    return
             else:
-                markdown = str(markdown)
+                logger.warning(f"Skipping cache for {url}: markdown is not a string")
+                return
+
+        if not markdown.strip():
+            return
 
         if not self._get_embedder() or not self._get_cache_collection():
             return
+
+        # Compute content hash to avoid re‑caching unchanged pages
+        content_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+
         try:
-            # remove existing chunks for this url
-            existing = self._get_cache_collection().get(where={"url": url})
-            if existing and existing["ids"]:
-                self._get_cache_collection().delete(ids=existing["ids"])
+            # Check if we already have an up‑to‑date cache entry
+            existing = await anyio.to_thread.run_sync(
+                self._get_cache_collection().get, where={"url": url}
+            )
+            if existing and existing["metadatas"]:
+                # If the first chunk's content_hash matches, skip all work
+                if existing["metadatas"][0].get("content_hash") == content_hash:
+                    logger.debug(f"Cache unchanged for {url}, skipping re‑cache")
+                    return
+                # Otherwise, delete the outdated chunks
+                await anyio.to_thread.run_sync(
+                    self._get_cache_collection().delete, ids=existing["ids"]
+                )
 
             chunks = self._chunk_text(markdown)
             if not chunks:
@@ -1269,19 +1289,33 @@ class Tools:
             now = time.time()
             ids = [f"{url}#{i}" for i in range(len(chunks))]
             metadatas = [
-                {"url": url, "timestamp": now, "chunk_index": i}
+                {
+                    "url": url,
+                    "timestamp": now,
+                    "chunk_index": i,
+                    "content_hash": content_hash,
+                    "source": "crawl4ai",
+                }
                 for i in range(len(chunks))
             ]
 
-            self._get_cache_collection().add(
-                embeddings=embeddings.tolist(),
-                documents=chunks,
-                metadatas=metadatas,
-                ids=ids,
-            )
+            # Use a per‑URL lock to avoid race conditions
+            lock = self._cache_locks.setdefault(url, asyncio.Lock())
+            async with lock:
+                await anyio.to_thread.run_sync(
+                    self._get_cache_collection().add,
+                    embeddings=embeddings.tolist(),
+                    documents=chunks,
+                    metadatas=metadatas,
+                    ids=ids,
+                )
             logger.debug(f"Cached {len(chunks)} chunks for {url}")
         except Exception as e:
             logger.error(f"Error caching page {url}: {e}")
+        finally:
+            # Clean up lock if no longer needed
+            if url in self._cache_locks and not self._cache_locks[url].locked():
+                del self._cache_locks[url]
 
     def _get_cached_chunks(
         self, url: str, query: str, max_chunks: int = 3
@@ -2915,7 +2949,7 @@ Now evaluate these URLs:
                             url = result_entry.get("url")
                             markdown = result_entry.get("markdown")
                             if url and markdown:
-                                self._cache_page(url, markdown)
+                                await self._cache_page(url, markdown)
 
                     data_list = crawled_batch.get("content", [])
                     normalized_data_list = self._normalize_content(data_list)
