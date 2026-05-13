@@ -6,7 +6,7 @@ author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
 version: 2.8.19
 license: MIT
-requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
+requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb, hashlib
 """
 
 # region ── Imports ────────────────────────────────────────────────────────────
