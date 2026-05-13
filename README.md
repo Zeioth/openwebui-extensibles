@@ -245,3 +245,4 @@ Please log any issues [on the GitHub repository](https://github.com/Zeioth/openw
 * ~~A more inmediate and simple approach would be further refining our (currently very simple ) semantic search matching.~~ DONE
 * Order the valves in a way that makes sense.
 * Re, create the readme including a flow diagram or how it works internally at conceptual level (and function calls).
+* List the things commercial LLMs do and we don't.
