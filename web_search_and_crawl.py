@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.19
+version: 2.8.20
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -128,7 +128,7 @@ class Tools:
         )
         PREFLIGHT_TIMEOUT: int = Field(
             title="Pre-flight Check Timeout",
-            default=8,
+            default=5,
             description="Timeout in seconds for pre-flight HTML validation checks. Increase for slow sites, decrease for faster failure detection.",
         )
         CRAWL4AI_BASE_URL: str = Field(
@@ -373,6 +373,11 @@ class Tools:
             title="ChromaDB Cache Path",
             description="Directory for persisting the page cache.",
         )
+        PRELOAD_EMBEDDER: bool = Field(
+            default=False,
+            title="Preload Embedding Model",
+            description="If enabled, the SentenceTransformer model will be loaded at startup (consumes ~80MB RAM). Otherwise, it will be loaded on first use.",
+        )
 
     # endregion
 
@@ -450,6 +455,20 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self.user_valves = self.UserValves()
+
+        # Private attributes must be initialized before _configure()
+        self.crawl_counter = 0
+        self.content_counter = 0
+        self.total_urls = 0
+        self._detected_homonyms: Optional[List[str]] = None
+        self.stats_lock = asyncio.Lock()
+        self.status_lock = asyncio.Lock()
+        self._cache_locks: dict[str, asyncio.Lock] = {}
+
+        self._embedder = None
+        self._chroma_client = None
+        self._cache_collection = None
+        self._validation_session: Optional[aiohttp.ClientSession] = None
 
         self._configure()
 
@@ -533,19 +552,6 @@ class Tools:
             },
         ]
 
-        self.crawl_counter = 0
-        self.content_counter = 0
-        self.total_urls = 0
-        self._detected_homonyms: List[str] = []
-        # Locks for thread-safe concurrent updates
-        self.stats_lock = asyncio.Lock()
-        self.status_lock = asyncio.Lock()
-
-        # Semantic search and caching: defer initialization to avoid attribute errors
-        self._embedder = None
-        self._chroma_client = None
-        self._cache_collection = None
-
     def _get_embedder(self):
         if self._embedder is None:
             try:
@@ -574,6 +580,23 @@ class Tools:
             )
         return self._cache_collection
 
+    async def _get_validation_session(self) -> aiohttp.ClientSession:
+        if self._validation_session is None or self._validation_session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.valves.PREFLIGHT_TIMEOUT)
+            headers = {
+                "User-Agent": self.valves.CRAWL4AI_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            self._validation_session = aiohttp.ClientSession(
+                timeout=timeout, headers=headers
+            )
+        return self._validation_session
+
+    async def _close_validation_session(self):
+        if self._validation_session and not self._validation_session.closed:
+            await self._validation_session.close()
+            self._validation_session = None
+
     def _configure(self):
         """Validates valve configuration and logs warnings for common issues.
         Does not modify any valve values — misconfiguration must be fixed by the user.
@@ -600,6 +623,18 @@ class Tools:
             f"  - Page cache: {self.valves.USE_PAGE_CACHE} (TTL: {self.valves.CACHE_TTL_HOURS}h)"
         )
         logger.info(f"  - ChromaDB path: {self.valves.CHROMA_DB_PATH}")
+
+        # Optional preload of the embedding model
+        if self.valves.PRELOAD_EMBEDDER:
+            try:
+                _ = self._get_embedder()
+                logger.info("  - Embedder model preloaded successfully")
+            except Exception as e:
+                logger.warning(
+                    f"Embedder model preload skipped (will load on first use): {e}"
+                )
+        else:
+            logger.info("  - Embedder model preload disabled (will load on first use)")
 
     def _validate_url(self, url: str, name: str) -> None:
         """Warn if a valve URL is missing a protocol prefix. Does not modify the value."""
@@ -986,7 +1021,12 @@ class Tools:
 
         return True
 
-    async def _has_keywords(self, url: str, keywords: List[str]) -> bool:
+    async def _has_keywords(
+        self,
+        url: str,
+        keywords: List[str],
+        session: Optional[aiohttp.ClientSession] = None,
+    ) -> bool:
         """
         Fetch the page and check keywords in title and main content area.
         """
@@ -1012,56 +1052,58 @@ class Tools:
                 return False
 
         try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            headers = {
-                "User-Agent": self.valves.CRAWL4AI_USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
-
-            async with aiohttp.ClientSession(
-                timeout=timeout, headers=headers
-            ) as session:
+            # Use shared session if provided, otherwise create a new one
+            if session is None:
+                timeout = aiohttp.ClientTimeout(total=10)
+                headers = {
+                    "User-Agent": self.valves.CRAWL4AI_USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as s:
+                    async with s.get(url, allow_redirects=True) as resp:
+                        if resp.status >= 400:
+                            return False
+                        content = await resp.content.read(200 * 1024)
+                        html = content.decode("utf-8", errors="ignore").lower()
+            else:
                 async with session.get(url, allow_redirects=True) as resp:
                     if resp.status >= 400:
                         return False
-
                     content = await resp.content.read(200 * 1024)
                     html = content.decode("utf-8", errors="ignore").lower()
 
-                    title_match = re.search(
-                        r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE
-                    )
-                    title_text = title_match.group(1) if title_match else ""
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE)
+            title_text = title_match.group(1) if title_match else ""
 
-                    body_match = re.search(
-                        r"<body[^>]*>(.*?)</body>", html, re.IGNORECASE | re.DOTALL
-                    )
-                    body_text = ""
-                    if body_match:
-                        body_clean = re.sub(
-                            r"<script[^>]*>.*?</script>",
-                            "",
-                            body_match.group(1),
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
-                        body_clean = re.sub(
-                            r"<style[^>]*>.*?</style>",
-                            "",
-                            body_clean,
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
-                        body_text = re.sub(r"<[^>]+>", " ", body_clean)
-                        body_text = body_text[:5000]
+            body_match = re.search(
+                r"<body[^>]*>(.*?)</body>", html, re.IGNORECASE | re.DOTALL
+            )
+            body_text = ""
+            if body_match:
+                body_clean = re.sub(
+                    r"<script[^>]*>.*?</script>",
+                    "",
+                    body_match.group(1),
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                body_clean = re.sub(
+                    r"<style[^>]*>.*?</style>",
+                    "",
+                    body_clean,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                body_text = re.sub(r"<[^>]+>", " ", body_clean)
+                body_text = body_text[:5000]
 
-                    searchable_text = f"{title_text} {body_text}"
-                    matched = any(kw in searchable_text for kw in keywords)
+            searchable_text = f"{title_text} {body_text}"
+            matched = any(kw in searchable_text for kw in keywords)
 
-                    if self.valves.DEBUG:
-                        logger.debug(
-                            f"GET {url} -> Keywords found: {matched} (Title: '{title_text[:100]}')"
-                        )
+            if self.valves.DEBUG:
+                logger.debug(
+                    f"GET {url} -> Keywords found: {matched} (Title: '{title_text[:100]}')"
+                )
 
-                    return matched
+            return matched
 
         except asyncio.TimeoutError:
             if self.valves.DEBUG:
@@ -1429,11 +1471,7 @@ class Tools:
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> List[str]:
         """Filter search results to the most semantically relevant URLs using embeddings."""
-        if (
-            not self._get_embedder()
-            or not self._get_chroma_client()
-            or not search_results
-        ):
+        if not self._get_embedder() or not search_results:
             return [r["url"] for r in search_results]  # fallback
 
         if __event_emitter__ and self.valves.MORE_STATUS:
@@ -1452,36 +1490,29 @@ class Tools:
             texts = [
                 f"{r.get('title','')} {r.get('snippet','')}" for r in search_results
             ]
-            embeddings = self._get_embedder().encode(texts, convert_to_numpy=True)
 
-            # Temporary collection (disable default embedding function)
-            collection_name = f"semantic_filter_{uuid.uuid4().hex[:8]}"
-            collection = self._get_chroma_client().create_collection(
-                name=collection_name, embedding_function=None
+            # Generate embeddings with the local model
+            doc_embeddings = self._get_embedder().encode(texts, convert_to_numpy=True)
+            query_embedding = self._get_embedder().encode(
+                [query], convert_to_numpy=True
             )
 
-            collection.add(
-                embeddings=embeddings.tolist(),
-                documents=texts,
-                metadatas=[{"url": r["url"]} for r in search_results],
-                ids=[f"res_{i}" for i in range(len(search_results))],
+            # Normalize vectors
+            doc_norms = doc_embeddings / np.linalg.norm(
+                doc_embeddings, axis=1, keepdims=True
+            )
+            query_norm = query_embedding / np.linalg.norm(
+                query_embedding, axis=1, keepdims=True
             )
 
-            query_embedding = self._get_embedder().encode([query]).tolist()
+            # Compute cosine similarity
+            similarities = np.dot(doc_norms, query_norm.T).flatten()
+
+            # Select top_k
             top_k = min(self.valves.SEMANTIC_FILTER_TOP_K, len(search_results))
-            results = collection.query(
-                query_embeddings=query_embedding, n_results=top_k
-            )
+            top_indices = np.argsort(similarities)[::-1][:top_k]
 
-            # Extract URLs in order
-            filtered_urls = []
-            for meta_list in results.get("metadatas", [[]]):
-                for meta in meta_list:
-                    if meta.get("url") and meta["url"] not in filtered_urls:
-                        filtered_urls.append(meta["url"])
-
-            # Cleanup
-            self._get_chroma_client().delete_collection(collection_name)
+            filtered_urls = [search_results[i]["url"] for i in top_indices]
 
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
@@ -1671,14 +1702,21 @@ class Tools:
                         f"(anchors: {anchor_keywords}) for {len(urls)} URLs..."
                     )
 
+                # Use shared session
+                session = await self._get_validation_session()
+
                 # General keyword check
-                tasks = [self._has_keywords(url, preflight_keywords) for url in urls]
+                tasks = [
+                    self._has_keywords(url, preflight_keywords, session=session)
+                    for url in urls
+                ]
                 general_results = await asyncio.gather(*tasks)
 
                 # Anchor keyword check with fallback if too strict
                 if anchor_keywords:
                     anchor_tasks = [
-                        self._has_keywords(url, anchor_keywords) for url in urls
+                        self._has_keywords(url, anchor_keywords, session=session)
+                        for url in urls
                     ]
                     anchor_results = await asyncio.gather(*anchor_tasks)
                     strict_urls = [
@@ -2210,14 +2248,14 @@ Now output your JSON array:
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
 
-        # 1. Detect homonyms if not already present
-        if not self._detected_homonyms:
+        # Detect homonyms if not already present (use None as sentinel)
+        if self._detected_homonyms is None:
             self._detected_homonyms = await self._detect_homonyms_llm(
                 query, __event_emitter__
             )
 
-        # 2. Homonym pre-filter (unchanged)
-        detected = getattr(self, "_detected_homonyms", [])
+        # Homonym pre-filter
+        detected = self._detected_homonyms or []
         if detected:
             pre_filtered = []
             for url in urls:
@@ -2272,7 +2310,7 @@ Now output your JSON array:
         if not urls:
             return []
 
-        # Fetch titles (unchanged)
+        # Fetch titles
         url_titles = {}
 
         async def fetch_title(url: str) -> tuple[str, str]:
@@ -2301,7 +2339,7 @@ Now output your JSON array:
         for url, title in results:
             url_titles[url] = title
 
-        # Simplified prompt: ask for a flat array of decisions
+        # Build prompt
         homonym_context = ""
         if detected:
             homonym_list = ", ".join(detected)
@@ -2364,10 +2402,9 @@ Now evaluate these URLs:
                 )
             return filtered_urls
 
-        # ── Clean response ───────────────────────────────────────────────
+        # Clean response
         content = re.sub(r"```(?:json)?\s*", "", content)
         content = re.sub(r"```", "", content)
-        # Try to extract array
         brace_idx = content.find("[")
         if brace_idx != -1:
             content = content[brace_idx:]
@@ -2654,10 +2691,23 @@ Now evaluate these URLs:
                 }
             )
 
-        search_queries = await self._expand_query_with_llm(query, __event_emitter__)
+        # Run query expansion and homonym detection in parallel
+        expand_task = asyncio.create_task(
+            self._expand_query_with_llm(query, __event_emitter__)
+        )
+        homonym_task = (
+            asyncio.create_task(self._detect_homonyms_llm(query, __event_emitter__))
+            if self.valves.USE_LLM_URL_FILTER
+            else None
+        )
+
+        search_queries = await expand_task
         search_results = await self._search_all_queries(
             search_queries, __event_emitter__, __user__
         )
+
+        if homonym_task:
+            self._detected_homonyms = await homonym_task
 
         # Apply semantic filter if enabled
         if self.valves.USE_SEMANTIC_FILTER and search_results:
@@ -2860,8 +2910,7 @@ Now evaluate these URLs:
                 video_list.extend(research_result["videos"])
 
         else:
-            # ── Normal crawl with cache + parallel batches ──
-            # Validate URLs once before crawling
+            # Normal crawl with cache + parallel batches
             gathered_urls = await self._validate_url_pipeline(
                 gathered_urls,
                 query,
@@ -2869,7 +2918,6 @@ Now evaluate these URLs:
                 __event_emitter__=__event_emitter__,
             )
 
-            # Handle cache: retrieve cached chunks, split URLs, report stats
             cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks = (
                 await self._handle_cache_and_split(
                     gathered_urls, query, __event_emitter__
@@ -2913,48 +2961,37 @@ Now evaluate these URLs:
 
                 results = await asyncio.gather(*batch_tasks, return_exceptions=True)
 
-                for batch_idx, crawled_batch in enumerate(results):
-                    if isinstance(crawled_batch, Exception):
-                        logger.error(f"Batch crawl error: {crawled_batch}")
-                        continue
+                # Process results in parallel
+                async def process_single_page(result_entry, batch_idx):
+                    """Process a single page result: normalize, count tokens, truncate."""
+                    nonlocal total_tokens
 
-                    if not isinstance(crawled_batch, dict):
-                        continue
+                    img_urls = []
+                    vid_urls = []
 
-                    for img_url in crawled_batch.get("images", []):
+                    for img_url in result_entry.get("images", []):
                         parsed_image = urlparse(img_url)
                         base_image_url = f"{parsed_image.scheme}://{parsed_image.netloc}{parsed_image.path}"
-                        if base_image_url in seen_images:
-                            continue
-                        seen_images.add(base_image_url)
-                        thumbnail_url = (
-                            f"https://images.weserv.nl/?url={quote(img_url)}"
-                            f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
-                        )
-                        if await self._validate_image_url(
-                            img_url
-                        ) and await self._validate_image_url(thumbnail_url):
-                            image_list.append(img_url)
+                        if base_image_url not in seen_images:
+                            img_urls.append((img_url, base_image_url))
 
-                    for vid_url in crawled_batch.get("videos", []):
+                    for vid_url in result_entry.get("videos", []):
                         parsed_video = urlparse(vid_url)
                         base_video_url = f"{parsed_video.scheme}://{parsed_video.netloc}{parsed_video.path}"
-                        if base_video_url in seen_videos:
-                            continue
-                        seen_videos.add(base_video_url)
-                        video_list.append(vid_url)
+                        if base_video_url not in seen_videos:
+                            vid_urls.append((vid_url, base_video_url))
 
-                    # Cache each page's markdown
+                    # Cache markdown
                     if self.valves.USE_PAGE_CACHE:
-                        for result_entry in crawled_batch.get("raw_results", []):
-                            url = result_entry.get("url")
-                            markdown = result_entry.get("markdown")
-                            if url and markdown:
-                                await self._cache_page(url, markdown)
+                        url = result_entry.get("url")
+                        markdown = result_entry.get("markdown")
+                        if url and markdown:
+                            await self._cache_page(url, markdown)
 
-                    data_list = crawled_batch.get("content", [])
+                    data_list = result_entry.get("content", [])
                     normalized_data_list = self._normalize_content(data_list)
 
+                    page_tokens = 0
                     if normalized_data_list:
                         content_str = orjson.dumps(normalized_data_list).decode("utf-8")
                         page_tokens = await self._count_tokens(content_str)
@@ -2985,38 +3022,67 @@ Now evaluate these URLs:
                                 pass
                             page_tokens = effective
 
-                        async with self.stats_lock:
-                            total_tokens += page_tokens
-                            self.content_counter += 1
-                            self.crawl_counter += len(crawled_batch.get("content", []))
-                            crawl_results.extend(normalized_data_list)
+                    return normalized_data_list, page_tokens, img_urls, vid_urls
 
-                        if __event_emitter__ and self.valves.MORE_STATUS:
-                            async with self.status_lock:
-                                pages = self.content_counter
-                                total = self.total_urls
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"Analyzed {pages} page{'s' if pages != 1 else ''} from {total} URLs...",
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {
-                                            "description": f"Used {page_tokens} tokens for this batch.",
-                                            "done": False,
-                                        },
-                                    }
-                                )
-                        if self.valves.DEBUG:
-                            logger.debug(
-                                f"Used {page_tokens} tokens for batch of {len(batch)} URL(s)."
+                page_tasks = []
+                for batch_idx, crawled_batch in enumerate(results):
+                    if isinstance(crawled_batch, Exception):
+                        logger.error(f"Batch crawl error: {crawled_batch}")
+                        continue
+                    if not isinstance(crawled_batch, dict):
+                        continue
+
+                    for result_entry in crawled_batch.get("raw_results", []):
+                        page_tasks.append(process_single_page(result_entry, batch_idx))
+
+                if page_tasks:
+                    page_results = await asyncio.gather(
+                        *page_tasks, return_exceptions=True
+                    )
+
+                    for pr in page_results:
+                        if isinstance(pr, Exception):
+                            logger.error(f"Page processing error: {pr}")
+                            continue
+
+                        normalized_data_list, page_tokens, img_urls, vid_urls = pr
+
+                        for img_url, base_image_url in img_urls:
+                            seen_images.add(base_image_url)
+                            thumbnail_url = (
+                                f"https://images.weserv.nl/?url={quote(img_url)}"
+                                f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
                             )
+                            if await self._validate_image_url(
+                                img_url
+                            ) and await self._validate_image_url(thumbnail_url):
+                                image_list.append(img_url)
+
+                        for vid_url, base_video_url in vid_urls:
+                            seen_videos.add(base_video_url)
+                            video_list.append(vid_url)
+
+                        if normalized_data_list:
+                            async with self.stats_lock:
+                                total_tokens += page_tokens
+                                self.content_counter += 1
+                                self.crawl_counter += len(normalized_data_list)
+                                crawl_results.extend(normalized_data_list)
+
+                # Emit final status
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    async with self.status_lock:
+                        pages = self.content_counter
+                        total = self.total_urls
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Analyzed {pages} page{'s' if pages != 1 else ''} from {total} URLs...",
+                                    "done": False,
+                                },
+                            }
+                        )
 
         crawl_results = self._normalize_content(crawl_results)
 
@@ -3079,6 +3145,10 @@ Now evaluate these URLs:
                     },
                 }
             )
+
+        # Close shared validation session
+        await self._close_validation_session()
+
         logger.info(f"Search and crawl finished in {elapsed_str}")
         return crawl_results
 
@@ -4029,7 +4099,7 @@ Now evaluate these URLs:
             "images": [],
             "videos": [],
             "sources": {},
-            "total_pages": 0,  # now counts attempted pages (passed validation)
+            "total_pages": 0,
             "tokens_used": 0,
         }
 
@@ -4054,7 +4124,7 @@ Now evaluate these URLs:
             if results["total_pages"] >= max_pages:
                 break
 
-            # Count this page as attempted (like the other research strategies)
+            # Count this page as attempted
             results["total_pages"] += 1
 
             # Token budget with decay
@@ -4276,7 +4346,7 @@ Now evaluate these URLs:
                 results["images"].extend(link_result.get("images", []))
                 results["videos"].extend(link_result.get("videos", []))
 
-        # Final normalisation and sorting (unchanged)
+        # Final normalisation and sorting
         results["content"] = self._normalize_content(results["content"])
         results["content"].sort(
             key=lambda x: sum(
