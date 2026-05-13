@@ -6,7 +6,7 @@ author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
 version: 2.8.19
 license: MIT
-requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb, hashlib
+requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
 
 # region ── Imports ────────────────────────────────────────────────────────────
@@ -1269,7 +1269,7 @@ class Tools:
         try:
             # Check if we already have an up‑to‑date cache entry
             existing = await anyio.to_thread.run_sync(
-                self._get_cache_collection().get, where={"url": url}
+                lambda: self._get_cache_collection().get(where={"url": url})
             )
             if existing and existing["metadatas"]:
                 # If the first chunk's content_hash matches, skip all work
@@ -1278,7 +1278,7 @@ class Tools:
                     return
                 # Otherwise, delete the outdated chunks
                 await anyio.to_thread.run_sync(
-                    self._get_cache_collection().delete, ids=existing["ids"]
+                    lambda: self._get_cache_collection().delete(ids=existing["ids"])
                 )
 
             chunks = self._chunk_text(markdown)
@@ -1303,11 +1303,12 @@ class Tools:
             lock = self._cache_locks.setdefault(url, asyncio.Lock())
             async with lock:
                 await anyio.to_thread.run_sync(
-                    self._get_cache_collection().add,
-                    embeddings=embeddings.tolist(),
-                    documents=chunks,
-                    metadatas=metadatas,
-                    ids=ids,
+                    lambda: self._get_cache_collection().add(
+                        embeddings=embeddings.tolist(),
+                        documents=chunks,
+                        metadatas=metadatas,
+                        ids=ids,
+                    )
                 )
             logger.debug(f"Cached {len(chunks)} chunks for {url}")
         except Exception as e:
