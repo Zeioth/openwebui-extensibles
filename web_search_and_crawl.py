@@ -4,9 +4,9 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.15
+version: 2.8.20
 license: MIT
-requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken
+requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
 
 # region ── Imports ────────────────────────────────────────────────────────────
@@ -21,9 +21,12 @@ import tiktoken
 import aiohttp
 import time
 import asyncio
+import uuid
+import hashlib
+import numpy as np
 from urllib.parse import parse_qs, urlparse, quote
 from pydantic import BaseModel, Field
-from typing import Any, List, Optional, Union, Callable, Literal
+from typing import Any, List, Optional, Union, Callable, Literal, Tuple
 from loguru import logger
 from crawl4ai import (
     BestFirstCrawlingStrategy,
@@ -38,6 +41,10 @@ from crawl4ai import (
 )
 from crawl4ai.content_filter_strategy import PruningContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+
+# semantic search & caching
+from sentence_transformers import SentenceTransformer
+import chromadb
 
 # OpenWebUI imports for native search
 try:
@@ -79,11 +86,14 @@ class Tools:
     # region ── Valves ─────────────────────────────────────────────────────────
 
     class Valves(BaseModel):
+        # ── Initial Response ─────────────────────────────────────────────────
         INITIAL_RESPONSE: str = Field(
             title="Initial delta response",
             default="I just need to do a search online to get some more info, I'll get back to you in a minute or so with a response if thats ok with you...",
             description="The response the tool will post in the chat window when it starts its search and crawl. Set as blank for no response.",
         )
+
+        # ── Search Engines ───────────────────────────────────────────────────
         USE_NATIVE_SEARCH: bool = Field(
             title="Use Native Search",
             default=True,
@@ -119,11 +129,15 @@ class Tools:
             default=10,
             description="The maximum number of results to return from SearXNG.",
         )
+
+        # ── Pre-flight Validation ────────────────────────────────────────────
         PREFLIGHT_TIMEOUT: int = Field(
             title="Pre-flight Check Timeout",
-            default=8,
+            default=5,
             description="Timeout in seconds for pre-flight HTML validation checks. Increase for slow sites, decrease for faster failure detection.",
         )
+
+        # ── Crawl4AI – Connection ────────────────────────────────────────────
         CRAWL4AI_BASE_URL: str = Field(
             title="Crawl4AI Base URL",
             default="http://crawl4ai:11235",
@@ -134,6 +148,8 @@ class Tools:
             default="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.1.2.3 Safari/537.36",
             description="Custom User-Agent string for Crawl4AI.",
         )
+
+        # ── Crawl4AI – Limits & Performance ──────────────────────────────────
         CRAWL4AI_TIMEOUT: int = Field(
             title="Crawl4AI Timeout",
             default=60,
@@ -156,6 +172,30 @@ class Tools:
             title="Parallel Batches",
             description="Maximum number of crawl batches to process concurrently. Higher values reduce total time but increase network load.",
         )
+        CRAWL4AI_MAX_TOKENS: int = Field(
+            title="Max Tokens used by Crawl4AI",
+            default=0,
+            description="Maximum tokens to use for the web search content response. Set to 0 for unlimited.",
+        )
+        CRAWL4AI_TOKEN_DECAY_ALPHA: float = Field(
+            default=0.5,
+            ge=0.0,
+            le=2.0,
+            title="Token Decay Aggressiveness",
+            description="Controls how fast the per‑page token limit decreases across crawled pages. "
+            "0 = no decay (same limit for all pages); "
+            "0.5 = square‑root decay (smooth); "
+            "1 = linear decay (1/page_number); "
+            "2 = quadratic decay (very aggressive).",
+        )
+        CRAWL4AI_MIN_PAGE_TOKEN_BUDGET: int = Field(
+            default=200,
+            ge=0,
+            title="Minimum Page Token Budget",
+            description="If the token budget for a page falls below this number (and CRAWL4AI_MAX_TOKENS > 0), the page will be skipped entirely to avoid useless crawls. Set to 0 to disable.",
+        )
+
+        # ── Crawl4AI – Content Filters ───────────────────────────────────────
         CRAWL4AI_EXTERNAL_DOMAINS: bool = Field(
             title="Crawl External Domains",
             default=False,
@@ -186,6 +226,41 @@ class Tools:
             default=False,
             description="Only extract text content, excluding images and other media. (Disables crawling and displaying media in the chat)",
         )
+
+        # ── Crawl4AI – Extraction & Media ────────────────────────────────────
+        LLM_INSTRUCTION: str = Field(
+            title="LLM Extraction Instruction",
+            default="""Focus on extracting the core content. Summarize lengthy sections into concise points
+            Include:
+            - Key concepts and explanations
+            - Important examples
+            - Critical details that enhance understanding
+            - Data from tables that support the main content
+            - Any relevant data snippets
+            Exclude:
+            - Navigation elements
+            - Sidebars
+            - Footer content
+            - Marketing or promotional material
+            - Advertisements
+            - User comments
+            - Any other non-essential information
+            Format the output as clean markdown with proper code blocks and headers.
+            """,
+            description="The instruction to use for the LLM when extracting from the webpage.",
+        )
+        CRAWL4AI_MIN_IMAGE_SCORE: int = Field(
+            title="Min Image Score To Include",
+            default=6,
+            ge=0,
+            le=10,
+            description="Minimum image score from Crawl4AI to consider including in the response. Min 0, Max 10.",
+        )
+        CRAWL4AI_VALIDATE_IMAGES: bool = Field(
+            title="Validate Image Links",
+            default=True,
+            description="Validate any image links to make sure they are accessible.",
+        )
         CRAWL4AI_DISPLAY_MEDIA: bool = Field(
             title="Display Media in Chat",
             default=True,
@@ -206,34 +281,54 @@ class Tools:
             default=200,
             description="Image thumbnail size (in px) square.  eg, setting 200 will mean thumbnails are 200x200px in size. Ignored if 'Display images as thumbnails' is off.",
         )
-        CRAWL4AI_MIN_IMAGE_SCORE: int = Field(
-            title="Min Image Score To Include",
-            default=6,
-            ge=0,
-            le=10,
-            description="Minimum image score from Crawl4AI to consider including in the response. Min 0, Max 10.",
+
+        # ── Features ─────────────────────────────────────────────────────────
+        USE_QUERY_EXPANSION: bool = Field(
+            title="Use Query Expansion",
+            default=False,
+            description="Use LLM to generate related search terms to find more relevant results.",
         )
-        CRAWL4AI_VALIDATE_IMAGES: bool = Field(
-            title="Validate Image Links",
+        USE_LLM_URL_FILTER: bool = Field(
+            title="Use LLM URL Filter",
+            default=False,
+            description="Use LLM to analyze and filter out URLs that are obviously unrelated to the search query. This adds a small delay but improves relevance and saves tokens.",
+        )
+        USE_SEMANTIC_FILTER: bool = Field(
             default=True,
-            description="Validate any image links to make sure they are accessible.",
+            title="Use Semantic Filter",
+            description="Filter search results semantically to crawl only the most relevant URLs.",
         )
-        CRAWL4AI_MAX_TOKENS: int = Field(
-            title="Max Tokens used by Crawl4AI",
-            default=0,
-            description="Maximum tokens to use for the web search content response. Set to 0 for unlimited.",
+        USE_PAGE_CACHE: bool = Field(
+            default=True,
+            title="Use Page Cache",
+            description="Cache crawled page content to avoid re-crawling the same URL within TTL.",
         )
-        TOKEN_DECAY_ALPHA: float = Field(
-            default=0.5,
-            ge=0.0,
-            le=2.0,
-            title="Token Decay Aggressiveness",
-            description="Controls how fast the per‑page token limit decreases across crawled pages. "
-            "0 = no decay (same limit for all pages); "
-            "0.5 = square‑root decay (smooth); "
-            "1 = linear decay (1/page_number); "
-            "2 = quadratic decay (very aggressive).",
+
+        # ── Feature Parameters ───────────────────────────────────────────────
+        MAX_EXPANDED_QUERIES: int = Field(
+            title="Max Expanded Queries",
+            default=5,
+            description="Maximum number of related search terms to generate for query expansion.",
         )
+        SEMANTIC_FILTER_TOP_K: int = Field(
+            default=10,
+            ge=1,
+            title="Semantic Filter Top K",
+            description="Number of top relevant URLs to keep after semantic filtering.",
+        )
+        CACHE_TTL_HOURS: int = Field(
+            default=6,
+            ge=1,
+            title="Cache TTL (hours)",
+            description="How long a cached page fragment stays fresh. After this, the URL will be re-crawled.",
+        )
+        CHROMA_DB_PATH: str = Field(
+            default="./chroma_cache",
+            title="ChromaDB Cache Path",
+            description="Directory for persisting the page cache.",
+        )
+
+        # ── LLM Provider ─────────────────────────────────────────────────────
         LLM_BASE_URL: str = Field(
             title="LLM Base URL",
             default="https://openrouter.ai/api/v1",
@@ -268,31 +363,29 @@ class Tools:
             description="LLM provider/model to use for URL filtering. If empty, falls back to LLM_PROVIDER.",
             examples=["ollama/llama3.2", "openai/gpt-4o-mini"],
         )
+
+        # ── Debug & Misc ─────────────────────────────────────────────────────
+        MORE_STATUS: bool = Field(
+            title="More status updates",
+            default=True,
+            description="Show more status updates during web search and crawl",
+        )
+        DEBUG: bool = Field(
+            title="Debug logging",
+            default=True,
+            description="Enable detailed debug logging",
+        )
+        PRELOAD_EMBEDDER: bool = Field(
+            default=False,
+            title="Preload Embedding Model",
+            description="If enabled, the SentenceTransformer model will be loaded at startup (consumes ~80MB RAM). Otherwise, it will be loaded on first use.",
+        )
+
+        # LLM parameters that were previously scattered; placed after provider for logical grouping
         LLM_TEMPERATURE: float = Field(
             title="LLM Temperature",
             default=0.3,
             description="The temperature to use for the LLM.",
-        )
-        LLM_INSTRUCTION: str = Field(
-            title="LLM Extraction Instruction",
-            default="""Focus on extracting the core content. Summarize lengthy sections into concise points
-            Include:
-            - Key concepts and explanations
-            - Important examples
-            - Critical details that enhance understanding
-            - Data from tables that support the main content
-            - Any relevant data snippets
-            Exclude:
-            - Navigation elements
-            - Sidebars
-            - Footer content
-            - Marketing or promotional material
-            - Advertisements
-            - User comments
-            - Any other non-essential information
-            Format the output as clean markdown with proper code blocks and headers.
-            """,
-            description="The instruction to use for the LLM when extracting from the webpage.",
         )
         LLM_MAX_TOKENS: int = Field(
             title="LLM Max Tokens",
@@ -313,31 +406,6 @@ class Tools:
             title="LLM Presence Penalty",
             default=None,
             description="The presence penalty to use for the LLM.",
-        )
-        MORE_STATUS: bool = Field(
-            title="More status updates",
-            default=True,
-            description="Show more status updates during web search and crawl",
-        )
-        DEBUG: bool = Field(
-            title="Debug logging",
-            default=True,
-            description="Enable detailed debug logging",
-        )
-        USE_LLM_URL_FILTER: bool = Field(
-            title="Use LLM URL Filter",
-            default=False,
-            description="Use LLM to analyze and filter out URLs that are obviously unrelated to the search query. This adds a small delay but improves relevance and saves tokens.",
-        )
-        USE_QUERY_EXPANSION: bool = Field(
-            title="Use Query Expansion",
-            default=False,
-            description="Use LLM to generate related search terms to find more relevant results.",
-        )
-        MAX_EXPANDED_QUERIES: int = Field(
-            title="Max Expanded Queries",
-            default=5,
-            description="Maximum number of related search terms to generate for query expansion.",
         )
 
     # endregion
@@ -416,6 +484,20 @@ class Tools:
     def __init__(self):
         self.valves = self.Valves()
         self.user_valves = self.UserValves()
+
+        # Private attributes must be initialized before _configure()
+        self.crawl_counter = 0
+        self.content_counter = 0
+        self.total_urls = 0
+        self._detected_homonyms: Optional[List[str]] = None
+        self.stats_lock = asyncio.Lock()
+        self.status_lock = asyncio.Lock()
+        self._cache_locks: dict[str, asyncio.Lock] = {}
+
+        self._embedder = None
+        self._chroma_client = None
+        self._cache_collection = None
+        self._validation_session: Optional[aiohttp.ClientSession] = None
 
         self._configure()
 
@@ -499,13 +581,53 @@ class Tools:
             },
         ]
 
-        self.crawl_counter = 0
-        self.content_counter = 0
-        self.total_urls = 0
-        self._detected_homonyms: List[str] = []
-        # Locks for thread-safe concurrent updates
-        self.stats_lock = asyncio.Lock()
-        self.status_lock = asyncio.Lock()
+    def as_tools(self) -> list[dict]:
+        return self.tools
+
+    def _get_embedder(self):
+        if self._embedder is None:
+            try:
+                self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
+            except Exception as e:
+                logger.error(f"Failed to load SentenceTransformer: {e}")
+                raise
+        return self._embedder
+
+    def _get_chroma_client(self):
+        if self._chroma_client is None:
+            try:
+                self._chroma_client = chromadb.PersistentClient(
+                    path=self.valves.CHROMA_DB_PATH
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize ChromaDB: {e}")
+                raise
+        return self._chroma_client
+
+    def _get_cache_collection(self):
+        if self._cache_collection is None:
+            client = self._get_chroma_client()
+            self._cache_collection = client.get_or_create_collection(
+                "page_cache", embedding_function=None
+            )
+        return self._cache_collection
+
+    async def _get_validation_session(self) -> aiohttp.ClientSession:
+        if self._validation_session is None or self._validation_session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.valves.PREFLIGHT_TIMEOUT)
+            headers = {
+                "User-Agent": self.valves.CRAWL4AI_USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            self._validation_session = aiohttp.ClientSession(
+                timeout=timeout, headers=headers
+            )
+        return self._validation_session
+
+    async def _close_validation_session(self):
+        if self._validation_session and not self._validation_session.closed:
+            await self._validation_session.close()
+            self._validation_session = None
 
     def _configure(self):
         """Validates valve configuration and logs warnings for common issues.
@@ -528,6 +650,23 @@ class Tools:
         logger.info(f"  - Native Search: {self.valves.USE_NATIVE_SEARCH}")
         logger.info(f"  - SearXNG: {self.valves.SEARCH_WITH_SEARXNG}")
         logger.info(f"  - Parallel batches: {self.valves.CRAWL4AI_PARALLEL_BATCHES}")
+        logger.info(f"  - Semantic filter: {self.valves.USE_SEMANTIC_FILTER}")
+        logger.info(
+            f"  - Page cache: {self.valves.USE_PAGE_CACHE} (TTL: {self.valves.CACHE_TTL_HOURS}h)"
+        )
+        logger.info(f"  - ChromaDB path: {self.valves.CHROMA_DB_PATH}")
+
+        # Optional preload of the embedding model
+        if self.valves.PRELOAD_EMBEDDER:
+            try:
+                _ = self._get_embedder()
+                logger.info("  - Embedder model preloaded successfully")
+            except Exception as e:
+                logger.warning(
+                    f"Embedder model preload skipped (will load on first use): {e}"
+                )
+        else:
+            logger.info("  - Embedder model preload disabled (will load on first use)")
 
     def _validate_url(self, url: str, name: str) -> None:
         """Warn if a valve URL is missing a protocol prefix. Does not modify the value."""
@@ -914,7 +1053,12 @@ class Tools:
 
         return True
 
-    async def _has_keywords(self, url: str, keywords: List[str]) -> bool:
+    async def _has_keywords(
+        self,
+        url: str,
+        keywords: List[str],
+        session: Optional[aiohttp.ClientSession] = None,
+    ) -> bool:
         """
         Fetch the page and check keywords in title and main content area.
         """
@@ -940,56 +1084,58 @@ class Tools:
                 return False
 
         try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            headers = {
-                "User-Agent": self.valves.CRAWL4AI_USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            }
-
-            async with aiohttp.ClientSession(
-                timeout=timeout, headers=headers
-            ) as session:
+            # Use shared session if provided, otherwise create a new one
+            if session is None:
+                timeout = aiohttp.ClientTimeout(total=10)
+                headers = {
+                    "User-Agent": self.valves.CRAWL4AI_USER_AGENT,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                }
+                async with aiohttp.ClientSession(timeout=timeout, headers=headers) as s:
+                    async with s.get(url, allow_redirects=True) as resp:
+                        if resp.status >= 400:
+                            return False
+                        content = await resp.content.read(200 * 1024)
+                        html = content.decode("utf-8", errors="ignore").lower()
+            else:
                 async with session.get(url, allow_redirects=True) as resp:
                     if resp.status >= 400:
                         return False
-
                     content = await resp.content.read(200 * 1024)
                     html = content.decode("utf-8", errors="ignore").lower()
 
-                    title_match = re.search(
-                        r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE
-                    )
-                    title_text = title_match.group(1) if title_match else ""
+            title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.IGNORECASE)
+            title_text = title_match.group(1) if title_match else ""
 
-                    body_match = re.search(
-                        r"<body[^>]*>(.*?)</body>", html, re.IGNORECASE | re.DOTALL
-                    )
-                    body_text = ""
-                    if body_match:
-                        body_clean = re.sub(
-                            r"<script[^>]*>.*?</script>",
-                            "",
-                            body_match.group(1),
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
-                        body_clean = re.sub(
-                            r"<style[^>]*>.*?</style>",
-                            "",
-                            body_clean,
-                            flags=re.DOTALL | re.IGNORECASE,
-                        )
-                        body_text = re.sub(r"<[^>]+>", " ", body_clean)
-                        body_text = body_text[:5000]
+            body_match = re.search(
+                r"<body[^>]*>(.*?)</body>", html, re.IGNORECASE | re.DOTALL
+            )
+            body_text = ""
+            if body_match:
+                body_clean = re.sub(
+                    r"<script[^>]*>.*?</script>",
+                    "",
+                    body_match.group(1),
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                body_clean = re.sub(
+                    r"<style[^>]*>.*?</style>",
+                    "",
+                    body_clean,
+                    flags=re.DOTALL | re.IGNORECASE,
+                )
+                body_text = re.sub(r"<[^>]+>", " ", body_clean)
+                body_text = body_text[:5000]
 
-                    searchable_text = f"{title_text} {body_text}"
-                    matched = any(kw in searchable_text for kw in keywords)
+            searchable_text = f"{title_text} {body_text}"
+            matched = any(kw in searchable_text for kw in keywords)
 
-                    if self.valves.DEBUG:
-                        logger.debug(
-                            f"GET {url} -> Keywords found: {matched} (Title: '{title_text[:100]}')"
-                        )
+            if self.valves.DEBUG:
+                logger.debug(
+                    f"GET {url} -> Keywords found: {matched} (Title: '{title_text[:100]}')"
+                )
 
-                    return matched
+            return matched
 
         except asyncio.TimeoutError:
             if self.valves.DEBUG:
@@ -1134,6 +1280,289 @@ class Tools:
 
     # endregion
 
+    # region ── Semantic Helpers (Chunking & Caching) ──────────────────────────
+
+    def _chunk_text(self, text: str, max_tokens: int = 256) -> List[str]:
+        """
+        Split text into chunks suitable for embedding with MiniLM.
+        Uses tiktoken to count tokens and respects sentence boundaries as much as possible.
+        """
+        try:
+            encoding = tiktoken.encoding_for_model("gpt-4")
+        except KeyError:
+            encoding = tiktoken.get_encoding("cl100k_base")
+
+        # split into sentences (support Spanish ¿, ¡, …, etc.)
+        sentences = re.split(r"(?<=[.!?¿¡…])\s+", text)
+        chunks = []
+        current_chunk = []
+        current_tokens = 0
+
+        for sentence in sentences:
+            tok_count = len(encoding.encode(sentence))
+            if current_tokens + tok_count > max_tokens and current_chunk:
+                chunks.append(" ".join(current_chunk))
+                current_chunk = []
+                current_tokens = 0
+            current_chunk.append(sentence)
+            current_tokens += tok_count
+
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+        return chunks
+
+    async def _cache_page(self, url: str, markdown: Any):
+        """Store page chunks with embeddings and timestamp in the persistent collection."""
+        # Only cache if markdown is a non-empty string; otherwise skip silently
+        if not isinstance(markdown, str):
+            if isinstance(markdown, dict):
+                # Try to extract a meaningful string from known keys
+                for key in ("markdown", "raw_markdown", "fit_markdown", "text"):
+                    if key in markdown and isinstance(markdown[key], str):
+                        markdown = markdown[key]
+                        break
+                else:
+                    logger.warning(
+                        f"Skipping cache for {url}: markdown is dict without known text keys"
+                    )
+                    return
+            else:
+                logger.warning(f"Skipping cache for {url}: markdown is not a string")
+                return
+
+        if not markdown.strip():
+            return
+
+        if not self._get_embedder() or not self._get_cache_collection():
+            return
+
+        # Compute content hash to avoid re‑caching unchanged pages
+        content_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+
+        try:
+            # Check if we already have an up‑to‑date cache entry
+            existing = await anyio.to_thread.run_sync(
+                lambda: self._get_cache_collection().get(where={"url": url})
+            )
+            if existing and existing["metadatas"]:
+                # If the first chunk's content_hash matches, skip all work
+                if existing["metadatas"][0].get("content_hash") == content_hash:
+                    logger.debug(f"Cache unchanged for {url}, skipping re‑cache")
+                    return
+                # Otherwise, delete the outdated chunks
+                await anyio.to_thread.run_sync(
+                    lambda: self._get_cache_collection().delete(ids=existing["ids"])
+                )
+
+            chunks = self._chunk_text(markdown)
+            if not chunks:
+                return
+
+            embeddings = self._get_embedder().encode(chunks, convert_to_numpy=True)
+            now = time.time()
+            ids = [f"{url}#{i}" for i in range(len(chunks))]
+            metadatas = [
+                {
+                    "url": url,
+                    "timestamp": now,
+                    "chunk_index": i,
+                    "content_hash": content_hash,
+                    "source": "crawl4ai",
+                }
+                for i in range(len(chunks))
+            ]
+
+            # Use a per‑URL lock to avoid race conditions
+            lock = self._cache_locks.setdefault(url, asyncio.Lock())
+            async with lock:
+                await anyio.to_thread.run_sync(
+                    lambda: self._get_cache_collection().add(
+                        embeddings=embeddings.tolist(),
+                        documents=chunks,
+                        metadatas=metadatas,
+                        ids=ids,
+                    )
+                )
+            logger.debug(f"Cached {len(chunks)} chunks for {url}")
+        except Exception as e:
+            logger.error(f"Error caching page {url}: {e}")
+        finally:
+            # Clean up lock if no longer needed
+            if url in self._cache_locks and not self._cache_locks[url].locked():
+                del self._cache_locks[url]
+
+    def _get_cached_chunks(
+        self, url: str, query: str, max_chunks: int = 3
+    ) -> List[str]:
+        """Retrieve relevant cached chunks for a URL if they are still fresh."""
+        if not self._get_embedder() or not self._get_cache_collection():
+            return []
+        try:
+            # Fetch all chunks for this URL
+            results = self._get_cache_collection().get(where={"url": url})
+            if not results or not results["ids"]:
+                return []
+
+            # Check freshness: maximum timestamp among chunks
+            timestamps = [meta.get("timestamp", 0) for meta in results["metadatas"]]
+            if not timestamps:
+                return []
+            max_ts = max(timestamps)
+            ttl_seconds = self.valves.CACHE_TTL_HOURS * 3600
+            if time.time() - max_ts > ttl_seconds:
+                # Stale, delete entire url cached chunks
+                self._get_cache_collection().delete(ids=results["ids"])
+                return []
+
+            if not results["documents"]:
+                return []
+
+            # Perform semantic search within this page's chunks
+            query_embedding = self._get_embedder().encode([query]).tolist()
+            chunk_embeddings = self._get_embedder().encode(
+                results["documents"], convert_to_numpy=True
+            )
+            query_vec = np.array(query_embedding[0])
+            # normalize
+            query_norm = query_vec / np.linalg.norm(query_vec)
+            chunk_norms = chunk_embeddings / np.linalg.norm(
+                chunk_embeddings, axis=1, keepdims=True
+            )
+            similarities = np.dot(chunk_norms, query_norm)
+            top_indices = np.argsort(similarities)[::-1][:max_chunks]
+            return [results["documents"][i] for i in top_indices]
+        except Exception as e:
+            logger.error(f"Error getting cached chunks for {url}: {e}")
+            return []
+
+    async def _handle_cache_and_split(
+        self,
+        gathered_urls: List[str],
+        query: str,
+        __event_emitter__: Callable[[dict], Any] = None,
+    ) -> Tuple[List[dict], List[str], int, int]:
+        """
+        Consult cache, return (cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks).
+        Emits status message and logs summary.
+        """
+        cached_results = []
+        uncached_urls = []
+        cache_hit_urls = 0
+        cache_hit_chunks = 0
+
+        if self.valves.USE_PAGE_CACHE:
+            for url in gathered_urls:
+                chunks = self._get_cached_chunks(url, query, max_chunks=3)
+                if chunks:
+                    cache_hit_urls += 1
+                    for chunk in chunks:
+                        cached_results.append(
+                            {"topic": f"From cache: {url}", "summary": chunk}
+                        )
+                        cache_hit_chunks += 1
+                else:
+                    uncached_urls.append(url)
+
+            # Build status message
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                if cache_hit_urls > 0:
+                    msg = f"📦 Cache hits: {cache_hit_urls} URL(s) served ({cache_hit_chunks} chunks)."
+                else:
+                    msg = "📦 No cache hits for this query."
+                await __event_emitter__(
+                    {"type": "status", "data": {"description": msg, "done": False}}
+                )
+
+            logger.info(
+                f"Cache summary – URLs served from cache: {cache_hit_urls}, chunks: {cache_hit_chunks}"
+            )
+        else:
+            uncached_urls = gathered_urls
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "📦 Cache disabled, crawling all URLs.",
+                            "done": False,
+                        },
+                    }
+                )
+
+        return cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks
+
+    # endregion
+
+    # region ── Semantic Filter (snippet level) ────────────────────────────────
+
+    async def _semantic_filter_urls(
+        self,
+        search_results: List[dict],
+        query: str,
+        __event_emitter__: Callable[[dict], Any] = None,
+    ) -> List[str]:
+        """Filter search results to the most semantically relevant URLs using embeddings."""
+        if not self._get_embedder() or not search_results:
+            return [r["url"] for r in search_results]  # fallback
+
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "🧠 Running semantic URL filter...",
+                        "done": False,
+                    },
+                }
+            )
+
+        try:
+            # Prepare documents for embedding
+            texts = [
+                f"{r.get('title','')} {r.get('snippet','')}" for r in search_results
+            ]
+
+            # Generate embeddings with the local model
+            doc_embeddings = self._get_embedder().encode(texts, convert_to_numpy=True)
+            query_embedding = self._get_embedder().encode(
+                [query], convert_to_numpy=True
+            )
+
+            # Normalize vectors
+            doc_norms = doc_embeddings / np.linalg.norm(
+                doc_embeddings, axis=1, keepdims=True
+            )
+            query_norm = query_embedding / np.linalg.norm(
+                query_embedding, axis=1, keepdims=True
+            )
+
+            # Compute cosine similarity
+            similarities = np.dot(doc_norms, query_norm.T).flatten()
+
+            # Select top_k
+            top_k = min(self.valves.SEMANTIC_FILTER_TOP_K, len(search_results))
+            top_indices = np.argsort(similarities)[::-1][:top_k]
+
+            filtered_urls = [search_results[i]["url"] for i in top_indices]
+
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🎯 Semantic filter kept {len(filtered_urls)} relevant URLs.",
+                            "done": False,
+                        },
+                    }
+                )
+            return filtered_urls
+        except Exception as e:
+            logger.error(f"Semantic filter failed: {e}")
+            return [r["url"] for r in search_results]  # fallback
+
+    # endregion
+
     # region ── URL Validation Pipeline ────────────────────────────────────────
 
     async def _deduplicate_wikipedia_urls(
@@ -1154,7 +1583,6 @@ class Tools:
             user_lang = __user__.get("language", "en") or "en"
 
         # Mapping: normalized title -> (best_url, best_lang, first_url, first_lang)
-        # We store both the best candidate and the first found to use as fallback
         articles: dict[str, dict[str, object]] = {}
 
         for url in urls:
@@ -1259,7 +1687,6 @@ class Tools:
 
         # Stage 3: Check keywords in content
         if check_keywords and query:
-            # Strip stopwords and short words to get meaningful anchor terms
             stopwords = {
                 "de",
                 "la",
@@ -1307,23 +1734,42 @@ class Tools:
                         f"(anchors: {anchor_keywords}) for {len(urls)} URLs..."
                     )
 
+                # Use shared session
+                session = await self._get_validation_session()
+
                 # General keyword check
-                tasks = [self._has_keywords(url, preflight_keywords) for url in urls]
+                tasks = [
+                    self._has_keywords(url, preflight_keywords, session=session)
+                    for url in urls
+                ]
                 general_results = await asyncio.gather(*tasks)
 
-                # Anchor keyword check (stricter: must contain the core subject)
+                # Anchor keyword check with fallback if too strict
                 if anchor_keywords:
                     anchor_tasks = [
-                        self._has_keywords(url, anchor_keywords) for url in urls
+                        self._has_keywords(url, anchor_keywords, session=session)
+                        for url in urls
                     ]
                     anchor_results = await asyncio.gather(*anchor_tasks)
-                    urls = [
+                    strict_urls = [
                         url
                         for url, general_ok, anchor_ok in zip(
                             urls, general_results, anchor_results
                         )
                         if general_ok and anchor_ok
                     ]
+                    # Fallback: if strict filtering leaves too few URLs, keep those that passed general check
+                    MIN_STRICT_URLS = (
+                        3  # minimum acceptable number of URLs after strict filter
+                    )
+                    if len(strict_urls) < MIN_STRICT_URLS:
+                        urls = [url for url, ok in zip(urls, general_results) if ok]
+                        if self.valves.DEBUG:
+                            logger.info(
+                                f"Anchor keyword check left only {len(strict_urls)} URLs (<{MIN_STRICT_URLS}); falling back to general keyword check only"
+                            )
+                    else:
+                        urls = strict_urls
                 else:
                     urls = [url for url, ok in zip(urls, general_results) if ok]
 
@@ -1737,8 +2183,8 @@ Now output your JSON array:
         queries: List[str],
         __event_emitter__: Callable[[dict], Any] = None,
         __user__: Optional[dict] = None,
-    ) -> List[str]:
-        """Perform searches for multiple queries in parallel and report per-query results."""
+    ) -> List[dict]:
+        """Perform searches for multiple queries in parallel and return rich results (url, title, snippet)."""
         # Emit start message
         if __event_emitter__ and self.valves.MORE_STATUS:
             engine_names = []
@@ -1757,39 +2203,35 @@ Now output your JSON array:
                 }
             )
 
-        # Create one coroutine per query that aggregates both engines
         async def search_query(q):
-            found_urls = []
-            # Run native and searxng concurrently per query (but we still need to await them)
+            rich_results = []
             tasks = []
             if self.valves.USE_NATIVE_SEARCH:
                 tasks.append(self._search_native(q, __event_emitter__, __user__))
             if self.valves.SEARCH_WITH_SEARXNG:
                 tasks.append(self._search_searxng(q, __event_emitter__))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for lst in results:
+            per_engine = await asyncio.gather(*tasks, return_exceptions=True)
+            seen = set()
+            for lst in per_engine:
                 if isinstance(lst, list):
-                    found_urls.extend(lst)
-            # Remove duplicates while preserving order
-            unique = []
-            for url in found_urls:
-                if url not in unique:
-                    unique.append(url)
-            return q, unique
+                    for item in lst:
+                        url = item["url"]
+                        if url not in seen:
+                            seen.add(url)
+                            rich_results.append(item)
+            return q, rich_results
 
-        # Launch all query searches in parallel
         per_query_tasks = [search_query(q) for q in queries]
         per_query_results = await asyncio.gather(
             *per_query_tasks, return_exceptions=True
         )
 
-        # Emit per-query progress
-        all_urls = []
+        all_rich = []
         for idx, item in enumerate(per_query_results, 1):
             if isinstance(item, Exception):
                 logger.error(f"Error searching query {queries[idx-1]}: {item}")
                 continue
-            q, urls = item
+            q, rich_list = item
             icon = "🎯" if idx == 1 else "🔄"
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
@@ -1805,32 +2247,27 @@ Now output your JSON array:
                     {
                         "type": "status",
                         "data": {
-                            "description": f"  → Found {len(urls)} URLs",
+                            "description": f"  → Found {len(rich_list)} URLs",
                             "done": False,
                         },
                     }
                 )
-            for url in urls:
-                if url not in all_urls:
-                    all_urls.append(url)
-
-        if self.valves.DEBUG:
-            logger.info(
-                f"Search across {len(queries)} queries returned {len(all_urls)} unique URLs"
-            )
+            for r in rich_list:
+                if r["url"] not in {x["url"] for x in all_rich}:
+                    all_rich.append(r)
 
         if __event_emitter__ and self.valves.MORE_STATUS:
             await __event_emitter__(
                 {
                     "type": "status",
                     "data": {
-                        "description": f"📊 Total unique URLs found: {len(all_urls)}",
+                        "description": f"📊 Total unique URLs found: {len(all_rich)}",
                         "done": False,
                     },
                 }
             )
 
-        return all_urls
+        return all_rich
 
     async def _filter_urls_with_llm(
         self,
@@ -1846,14 +2283,14 @@ Now output your JSON array:
         if not self.valves.USE_LLM_URL_FILTER or not urls:
             return urls
 
-        # 1. Detect homonyms if not already present
-        if not self._detected_homonyms:
+        # Detect homonyms if not already present (use None as sentinel)
+        if self._detected_homonyms is None:
             self._detected_homonyms = await self._detect_homonyms_llm(
                 query, __event_emitter__
             )
 
-        # 2. Homonym pre-filter (unchanged)
-        detected = getattr(self, "_detected_homonyms", [])
+        # Homonym pre-filter
+        detected = self._detected_homonyms or []
         if detected:
             pre_filtered = []
             for url in urls:
@@ -1908,7 +2345,7 @@ Now output your JSON array:
         if not urls:
             return []
 
-        # Fetch titles (unchanged)
+        # Fetch titles
         url_titles = {}
 
         async def fetch_title(url: str) -> tuple[str, str]:
@@ -1937,7 +2374,7 @@ Now output your JSON array:
         for url, title in results:
             url_titles[url] = title
 
-        # Simplified prompt: ask for a flat array of decisions
+        # Build prompt
         homonym_context = ""
         if detected:
             homonym_list = ", ".join(detected)
@@ -2000,10 +2437,9 @@ Now evaluate these URLs:
                 )
             return filtered_urls
 
-        # ── Clean response ───────────────────────────────────────────────
+        # Clean response
         content = re.sub(r"```(?:json)?\s*", "", content)
         content = re.sub(r"```", "", content)
-        # Try to extract array
         brace_idx = content.find("[")
         if brace_idx != -1:
             content = content[brace_idx:]
@@ -2127,7 +2563,7 @@ Now evaluate these URLs:
         query: str,
         __event_emitter__: Callable[[dict], Any] = None,
         __user__: Optional[dict] = None,
-    ) -> List[str]:
+    ) -> List[dict]:
         """Search using OpenWebUI's native web search."""
         if not self.valves.USE_NATIVE_SEARCH:
             return []
@@ -2153,14 +2589,19 @@ Now evaluate these URLs:
                 user=user,
             )
 
-            urls = [
-                item.get("link") for item in result.get("items", []) if item.get("link")
-            ]
-
-            if self.valves.DEBUG:
-                logger.info(f"Native search for '{query}' returned {len(urls)} URLs")
-
-            return urls
+            results = []
+            for item in result.get("items", []):
+                url = item.get("link")
+                if url:
+                    results.append(
+                        {
+                            "url": url,
+                            "title": item.get("title", ""),
+                            "snippet": item.get("snippet", "")
+                            or item.get("description", ""),
+                        }
+                    )
+            return results
 
         except Exception as e:
             logger.error(f"Error in native search: {str(e)}")
@@ -2170,8 +2611,8 @@ Now evaluate these URLs:
         self,
         query: str,
         __event_emitter__: Callable[[dict], Any] = None,
-    ) -> List[str]:
-        """Search SearXNG and return a list of URLs."""
+    ) -> List[dict]:
+        """Search SearXNG and return a list of result dicts with url, title, snippet."""
         if not self.valves.SEARCH_WITH_SEARXNG:
             return []
 
@@ -2203,29 +2644,23 @@ Now evaluate these URLs:
             response.raise_for_status()
             data = response.json()
 
-            results = data.get("results", [])
             max_results = (
                 self.user_valves.SEARXNG_MAX_RESULTS or self.valves.SEARXNG_MAX_RESULTS
             )
-            urls = [r["url"] for r in results[:max_results] if r.get("url")]
-
-            if self.valves.DEBUG:
-                logger.info(f"SearXNG search for '{query}' returned {len(urls)} URLs")
-
-            return urls
-
+            results = []
+            for r in data.get("results", [])[:max_results]:
+                url = r.get("url")
+                if url:
+                    results.append(
+                        {
+                            "url": url,
+                            "title": r.get("title", ""),
+                            "snippet": r.get("content", "") or r.get("snippet", ""),
+                        }
+                    )
+            return results
         except requests.exceptions.RequestException as e:
             logger.error(f"Error searching SearXNG: {str(e)}")
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"⚠️ Error in SearXNG search: {str(e)[:100]}",
-                            "done": False,
-                        },
-                    }
-                )
             return []
         except Exception as e:
             logger.error(f"Unexpected error in SearXNG search: {str(e)}")
@@ -2235,35 +2670,21 @@ Now evaluate these URLs:
 
     # region ── Main Entry Point ───────────────────────────────────────────────
 
-    async def search_and_crawl(
+    async def _prepare_search_urls(
         self,
         query: str,
-        urls: Optional[List[str]] = None,
-        max_results: Optional[int] = None,
-        max_images: Optional[int] = None,
-        research_mode: Optional[bool] = False,
-        research_crawl_mode: Optional[str] = None,
-        __event_emitter__: Callable[[dict], Any] = None,
-        __user__: Optional[dict] = None,
-    ) -> Union[list, str]:
+        urls: Optional[List[str]],
+        __event_emitter__: Callable[[dict], Any],
+        __user__: Optional[dict],
+    ) -> Tuple[List[str], List[str]]:
         """
-        Main entry point for web search and crawl.
+        Gathers and filters URLs from user input, query expansion, semantic filter and LLM filter.
+        Returns (gathered_urls, user_provided_urls).
         """
-        start_time = time.time()
-        logger.info(f"Starting search and crawl for '{query}'")
-
         gathered_urls = []
         user_provided_urls = []
-        self.crawl_counter = 0
-        self.content_counter = 0
-        self.total_urls = 0
 
-        if not max_images:
-            max_images = (
-                self.user_valves.CRAWL4AI_MAX_MEDIA_ITEMS
-                or self.valves.CRAWL4AI_MAX_MEDIA_ITEMS
-            )
-
+        # Include user-provided URLs
         if urls:
             for url in urls:
                 if not url.startswith("http"):
@@ -2272,29 +2693,35 @@ Now evaluate these URLs:
                     gathered_urls.append(url)
                     user_provided_urls.append(url)
 
-        if __event_emitter__ and str(self.valves.INITIAL_RESPONSE).strip() != "":
-            await __event_emitter__(
-                {
-                    "type": "chat:message:delta",
-                    "data": {"content": str(self.valves.INITIAL_RESPONSE).strip()},
-                }
-            )
+        # Run query expansion and homonym detection in parallel
+        expand_task = asyncio.create_task(
+            self._expand_query_with_llm(query, __event_emitter__)
+        )
+        homonym_task = (
+            asyncio.create_task(self._detect_homonyms_llm(query, __event_emitter__))
+            if self.valves.USE_LLM_URL_FILTER
+            else None
+        )
 
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"🔍 Searching for '{query}'...",
-                        "done": False,
-                    },
-                }
-            )
-
-        search_queries = await self._expand_query_with_llm(query, __event_emitter__)
-        search_urls = await self._search_all_queries(
+        search_queries = await expand_task
+        search_results = await self._search_all_queries(
             search_queries, __event_emitter__, __user__
         )
+
+        if homonym_task:
+            self._detected_homonyms = await homonym_task
+
+        # Apply semantic filter if enabled
+        if self.valves.USE_SEMANTIC_FILTER and search_results:
+            filtered_urls = await self._semantic_filter_urls(
+                search_results, query, __event_emitter__
+            )
+            if len(filtered_urls) >= 2:
+                search_urls = filtered_urls
+            else:
+                search_urls = [r["url"] for r in search_results]
+        else:
+            search_urls = [r["url"] for r in search_results]
 
         for url in search_urls:
             if url not in gathered_urls:
@@ -2319,6 +2746,429 @@ Now evaluate these URLs:
                 }
             )
 
+        # LLM URL filter
+        if self.valves.USE_LLM_URL_FILTER and gathered_urls:
+            gathered_urls = await self._filter_urls_with_llm(
+                gathered_urls, query, __event_emitter__
+            )
+
+        return gathered_urls, user_provided_urls
+
+    async def _run_normal_crawl(
+        self,
+        gathered_urls: List[str],
+        query: str,
+        max_images: int,
+        __event_emitter__: Callable[[dict], Any],
+    ) -> Tuple[List[dict], List[str], List[str]]:
+        """Executes normal crawl with cache and parallel batches."""
+        crawl_results = []
+        image_list = []
+        video_list = []
+        seen_images = set()
+        seen_videos = set()
+
+        thumbnail_size = (
+            self.user_valves.CRAWL4AI_THUMBNAIL_SIZE
+            or self.valves.CRAWL4AI_THUMBNAIL_SIZE
+            or 200
+        )
+
+        gathered_urls = await self._validate_url_pipeline(
+            gathered_urls,
+            query,
+            check_keywords=True,
+            __event_emitter__=__event_emitter__,
+        )
+
+        cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks = (
+            await self._handle_cache_and_split(gathered_urls, query, __event_emitter__)
+        )
+        if cached_results:
+            async with self.stats_lock:
+                self.content_counter += len(cached_results)
+                crawl_results.extend(cached_results)
+
+        if uncached_urls:
+            # Build batches
+            max_parallel = self.valves.CRAWL4AI_PARALLEL_BATCHES
+            sem = asyncio.Semaphore(max_parallel)
+            batch_tasks = []
+            batches = []
+            for i in range(0, len(uncached_urls), self.valves.CRAWL4AI_BATCH):
+                batch = uncached_urls[i : i + self.valves.CRAWL4AI_BATCH]
+                batch_index = len(batches)
+                batches.append((batch, batch_index))
+
+                budget = None
+                if self.valves.CRAWL4AI_MAX_TOKENS > 0:
+                    budget = int(
+                        self.valves.CRAWL4AI_MAX_TOKENS
+                        / max(
+                            1,
+                            (batch_index + 1) ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
+                        )
+                    )
+
+                # Skip batch if token budget is too low
+                if (
+                    budget is not None
+                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+                ):
+                    logger.debug(
+                        f"Skipping batch {batch_index}: token budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                    )
+                    continue
+
+                async def process_batch(batch=batch, budget=budget):
+                    async with sem:
+                        await asyncio.sleep(0.2)
+                        return await self._crawl_url(
+                            urls=batch,
+                            query=query,
+                            token_budget=budget,
+                            skip_validation=True,
+                            __event_emitter__=__event_emitter__,
+                        )
+
+                batch_tasks.append(process_batch())
+
+            results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+            await self._process_batch_results(
+                results,
+                batches,
+                query,
+                seen_images,
+                seen_videos,
+                image_list,
+                video_list,
+                crawl_results,
+                thumbnail_size,
+                __event_emitter__,
+            )
+
+        return crawl_results, image_list, video_list
+
+    async def _process_batch_results(
+        self,
+        results: List[Any],
+        batches: List[Tuple[List[str], int]],
+        query: str,
+        seen_images: set,
+        seen_videos: set,
+        image_list: List[str],
+        video_list: List[str],
+        crawl_results: List[dict],
+        thumbnail_size: int,
+        __event_emitter__: Callable[[dict], Any],
+    ) -> None:
+        """Processes results from Crawl4AI batches: cache, images, videos, and content (per page, in parallel)."""
+
+        # 1. Handle cache and media (non‑CPU intensive, done sequentially)
+        for batch_idx, crawled_batch in enumerate(results):
+            if isinstance(crawled_batch, Exception):
+                logger.error(f"Batch crawl error: {crawled_batch}")
+                continue
+            if not isinstance(crawled_batch, dict):
+                continue
+
+            # Cache markdown
+            if self.valves.USE_PAGE_CACHE:
+                for result_entry in crawled_batch.get("raw_results", []):
+                    url = result_entry.get("url")
+                    markdown = result_entry.get("markdown")
+                    if url and markdown:
+                        await self._cache_page(url, markdown)
+
+            # Images
+            for img_url in crawled_batch.get("images", []):
+                parsed_image = urlparse(img_url)
+                base_image_url = (
+                    f"{parsed_image.scheme}://{parsed_image.netloc}{parsed_image.path}"
+                )
+                if base_image_url in seen_images:
+                    continue
+                seen_images.add(base_image_url)
+                thumbnail_url = (
+                    f"https://images.weserv.nl/?url={quote(img_url)}"
+                    f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
+                )
+                if await self._validate_image_url(
+                    img_url
+                ) and await self._validate_image_url(thumbnail_url):
+                    image_list.append(img_url)
+
+            # Videos
+            for vid_url in crawled_batch.get("videos", []):
+                parsed_video = urlparse(vid_url)
+                base_video_url = (
+                    f"{parsed_video.scheme}://{parsed_video.netloc}{parsed_video.path}"
+                )
+                if base_video_url in seen_videos:
+                    continue
+                seen_videos.add(base_video_url)
+                video_list.append(vid_url)
+
+        # 2. Process every page across all batches in parallel
+        page_tasks = []
+        for batch_idx, crawled_batch in enumerate(results):
+            if isinstance(crawled_batch, Exception) or not isinstance(
+                crawled_batch, dict
+            ):
+                continue
+            for page_data in crawled_batch.get("content", []):
+                page_tasks.append(
+                    self._process_single_page(page_data, batch_idx, batches)
+                )
+
+        if page_tasks:
+            processed = await asyncio.gather(*page_tasks)
+            for norm_content, token_count in processed:
+                if norm_content:
+                    async with self.stats_lock:
+                        crawl_results.extend(norm_content)
+                        self.crawl_counter += len(norm_content)  # items in this page
+                        self.content_counter += 1  # pages processed
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    async with self.status_lock:
+                        pages = self.content_counter
+                        total = self.total_urls
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"Analyzed {pages} page{'s' if pages != 1 else ''} from {total} URLs...",
+                                    "done": False,
+                                },
+                            }
+                        )
+
+    async def _process_single_page(
+        self,
+        page_data: dict,
+        batch_idx: int,
+        batches: List[Tuple[List[str], int]],
+    ) -> Tuple[list, int]:
+        """
+        Normalise and token‑count a single page from a batch.
+        Returns (normalised_content_list, token_count).
+        """
+        content_list = page_data.get("content", [])
+        if not content_list:
+            return [], 0
+
+        norm = self._normalize_content(content_list)
+        if not norm:
+            return [], 0
+
+        content_str = orjson.dumps(norm).decode("utf-8")
+        tokens = await self._count_tokens(content_str)
+
+        # Token budget truncation
+        if self.valves.CRAWL4AI_MAX_TOKENS > 0:
+            budget_used = batches[batch_idx][1]
+            effective = int(
+                self.valves.CRAWL4AI_MAX_TOKENS
+                / max(1, (budget_used + 1) ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA)
+            )
+            if effective > 0 and tokens > effective:
+                content_str = await self._truncate_content(content_str, effective)
+                try:
+                    norm = orjson.loads(
+                        content_str.replace(
+                            "\n\n[Content truncated due to length...]", ""
+                        )
+                    )
+                except Exception:
+                    pass
+                tokens = effective
+
+        return norm, tokens
+
+    async def _run_research_crawl(
+        self,
+        gathered_urls: List[str],
+        query: str,
+        effective_crawl_mode: str,
+        max_urls: int,
+        __event_emitter__: Callable[[dict], Any],
+    ) -> Tuple[List[dict], List[str], List[str]]:
+        """Executes a research crawl using the selected strategy."""
+        crawl_results = []
+        image_list = []
+        video_list = []
+
+        research_result = await self._research_crawl(
+            urls=gathered_urls,
+            query=query,
+            mode=effective_crawl_mode,
+            max_tokens=self.valves.CRAWL4AI_MAX_TOKENS,
+            max_urls=max_urls,
+            __event_emitter__=__event_emitter__,
+        )
+
+        if "content" in research_result:
+            crawl_results.extend(research_result["content"])
+            if self.valves.DEBUG:
+                logger.info(
+                    f"Research mode added {len(research_result['content'])} content items"
+                )
+        if "images" in research_result:
+            image_list.extend(research_result["images"])
+        if "videos" in research_result:
+            video_list.extend(research_result["videos"])
+
+        return crawl_results, image_list, video_list
+
+    async def _display_media(
+        self,
+        image_list: List[str],
+        video_list: List[str],
+        max_images: int,
+        __event_emitter__: Callable[[dict], Any],
+    ) -> None:
+        """Emits markdown for images and videos if media display is enabled."""
+        if not __event_emitter__:
+            return
+        if not (
+            self.user_valves.CRAWL4AI_DISPLAY_MEDIA
+            or self.valves.CRAWL4AI_DISPLAY_MEDIA
+        ):
+            return
+
+        thumbnail_size = (
+            self.user_valves.CRAWL4AI_THUMBNAIL_SIZE
+            or self.valves.CRAWL4AI_THUMBNAIL_SIZE
+            or 200
+        )
+
+        max_items = self.valves.CRAWL4AI_MAX_MEDIA_ITEMS
+        image_list = image_list[:max_images] if max_images > 0 else image_list
+        video_list = video_list[:max_items] if max_items > 0 else video_list
+
+        if image_list:
+            image_markdown = ""
+            for img_url in image_list:
+                if (
+                    self.user_valves.CRAWL4AI_DISPLAY_THUMBNAILS
+                    or self.valves.CRAWL4AI_DISPLAY_THUMBNAILS
+                ):
+                    thumbnail_url = (
+                        f"https://images.weserv.nl/?url={quote(img_url)}"
+                        f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
+                    )
+                else:
+                    thumbnail_url = img_url
+                image_markdown += f"[![image]({thumbnail_url})]({img_url})\n"
+            await __event_emitter__(
+                {"type": "message", "data": {"content": image_markdown}}
+            )
+
+        if video_list:
+            video_markdown = "\n\n*Videos links:*\n"
+            for idx, vid_url in enumerate(video_list, 1):
+                video_markdown += f"{idx}. [{vid_url}]({vid_url})\n"
+            await __event_emitter__(
+                {"type": "message", "data": {"content": video_markdown}}
+            )
+
+    async def _emit_final_status(
+        self,
+        crawl_results: List[dict],
+        start_time: float,
+        __event_emitter__: Callable[[dict], Any],
+    ) -> None:
+        """Emits final status messages (inspected pages, elapsed time)."""
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"Inspected {len(crawl_results)} web pages.",
+                        "done": True,
+                    },
+                }
+            )
+
+        elapsed = time.time() - start_time
+        elapsed_str = (
+            f"{elapsed:.2f} seconds" if elapsed < 60 else f"{elapsed/60:.2f} minutes"
+        )
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"⏱️ Elapsed time: {elapsed_str}",
+                        "done": True,
+                    },
+                }
+            )
+
+    async def search_and_crawl(
+        self,
+        query: str,
+        urls: Optional[List[str]] = None,
+        max_results: Optional[int] = None,
+        max_images: Optional[int] = None,
+        research_mode: Optional[bool] = False,
+        research_crawl_mode: Optional[str] = None,
+        __event_emitter__: Callable[[dict], Any] = None,
+        __user__: Optional[dict] = None,
+    ) -> Union[list, str]:
+        """
+        Main entry point for web search and crawl.
+        """
+        start_time = time.time()
+        logger.info(f"Starting search and crawl for '{query}'")
+
+        if not max_images:
+            max_images = (
+                self.user_valves.CRAWL4AI_MAX_MEDIA_ITEMS
+                or self.valves.CRAWL4AI_MAX_MEDIA_ITEMS
+            )
+
+        # Initial response
+        if __event_emitter__ and str(self.valves.INITIAL_RESPONSE).strip() != "":
+            await __event_emitter__(
+                {
+                    "type": "chat:message:delta",
+                    "data": {"content": str(self.valves.INITIAL_RESPONSE).strip()},
+                }
+            )
+
+        if __event_emitter__:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"🔍 Searching for '{query}'...",
+                        "done": False,
+                    },
+                }
+            )
+
+        # Preload embedder model in background if not already loaded
+        if self._embedder is None:
+
+            async def preload_embedder():
+                try:
+                    await anyio.to_thread.run_sync(self._get_embedder)
+                except Exception:
+                    pass  # will load on first use if preload fails
+
+            asyncio.create_task(preload_embedder())
+
+        # Reset counters
+        self.crawl_counter = 0
+        self.content_counter = 0
+        self.total_urls = 0
+
+        # 1. Prepare search URLs
+        gathered_urls, user_provided_urls = await self._prepare_search_urls(
+            query, urls, __event_emitter__, __user__
+        )
+
         if not gathered_urls:
             if __event_emitter__:
                 await __event_emitter__(
@@ -2330,57 +3180,11 @@ Now evaluate these URLs:
                         },
                     }
                 )
-            elapsed = time.time() - start_time
-            elapsed_str = (
-                f"{elapsed:.2f} seconds"
-                if elapsed < 60
-                else f"{elapsed/60:.2f} minutes"
+            await self._emit_final_status([], start_time, __event_emitter__)
+            logger.info(
+                f"Search and crawl finished in {time.time() - start_time:.2f} seconds"
             )
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"⏱️ Elapsed time: {elapsed_str}",
-                        "done": True,
-                    },
-                }
-            )
-            logger.info(f"Search and crawl finished in {elapsed_str}")
             return f"No URLs found to crawl for the query: {query}."
-
-        if self.valves.USE_LLM_URL_FILTER and len(gathered_urls) > 0:
-            gathered_urls = await self._filter_urls_with_llm(
-                gathered_urls, query, __event_emitter__
-            )
-
-            if not gathered_urls:
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": "❌ AI filter removed all URLs.",
-                                "done": True,
-                            },
-                        }
-                    )
-                elapsed = time.time() - start_time
-                elapsed_str = (
-                    f"{elapsed:.2f} seconds"
-                    if elapsed < 60
-                    else f"{elapsed/60:.2f} minutes"
-                )
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"⏱️ Elapsed time: {elapsed_str}",
-                            "done": True,
-                        },
-                    }
-                )
-                logger.info(f"Search and crawl finished in {elapsed_str}")
-                return f"No relevant URLs were found for the query: {query}."
 
         # Prioritize user-provided URLs
         search_only_urls = [
@@ -2388,6 +3192,7 @@ Now evaluate these URLs:
         ]
         gathered_urls = user_provided_urls + search_only_urls
 
+        # Limit URLs
         max_urls = self.user_valves.CRAWL4AI_MAX_URLS or self.valves.CRAWL4AI_MAX_URLS
         if len(gathered_urls) > max_urls:
             if self.valves.DEBUG:
@@ -2428,17 +3233,6 @@ Now evaluate these URLs:
                     f"Research mode: {effective_research_mode}, mode: {effective_crawl_mode}"
                 )
 
-        crawl_results = []
-        image_list = []
-        video_list = []
-        seen_images = set()
-        seen_videos = set()
-        total_tokens = 0
-        thumbnail_size = (
-            self.user_valves.CRAWL4AI_THUMBNAIL_SIZE
-            or self.valves.CRAWL4AI_THUMBNAIL_SIZE
-            or 200
-        )
         self.total_urls = len(gathered_urls)
 
         if __event_emitter__ and self.valves.MORE_STATUS:
@@ -2452,7 +3246,8 @@ Now evaluate these URLs:
                 }
             )
 
-        if effective_research_mode and len(gathered_urls) > 0:
+        # 2. Execute crawl (normal or research)
+        if effective_research_mode and gathered_urls:
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
@@ -2463,233 +3258,29 @@ Now evaluate these URLs:
                         },
                     }
                 )
-
-            research_result = await self._research_crawl(
-                urls=gathered_urls,
-                query=query,
-                mode=effective_crawl_mode,
-                max_tokens=self.valves.CRAWL4AI_MAX_TOKENS,
-                max_urls=max_urls,
-                __event_emitter__=__event_emitter__,
+            crawl_results, image_list, video_list = await self._run_research_crawl(
+                gathered_urls, query, effective_crawl_mode, max_urls, __event_emitter__
             )
-
-            if "content" in research_result:
-                crawl_results.extend(research_result["content"])
-                if self.valves.DEBUG:
-                    logger.info(
-                        f"Research mode added {len(research_result['content'])} content items"
-                    )
-            if "images" in research_result:
-                image_list.extend(research_result["images"])
-            if "videos" in research_result:
-                video_list.extend(research_result["videos"])
-
         else:
-            # ── Normal crawl with parallel batches ──
-            # Validate URLs once before crawling
-            gathered_urls = await self._validate_url_pipeline(
-                gathered_urls,
-                query,
-                check_keywords=True,
-                __event_emitter__=__event_emitter__,
+            crawl_results, image_list, video_list = await self._run_normal_crawl(
+                gathered_urls, query, max_images, __event_emitter__
             )
 
-            # Prepare batch tasks with semaphore control
-            max_parallel = self.valves.CRAWL4AI_PARALLEL_BATCHES
-            sem = asyncio.Semaphore(max_parallel)
-            batch_tasks = []
-            batches = []
-            for i in range(0, len(gathered_urls), self.valves.CRAWL4AI_BATCH):
-                batch = gathered_urls[i : i + self.valves.CRAWL4AI_BATCH]
-                batch_index = len(batches)
-                batches.append((batch, batch_index))
-
-                # Token budget per batch (based on batch index)
-                budget = None
-                if self.valves.CRAWL4AI_MAX_TOKENS > 0:
-                    budget = int(
-                        self.valves.CRAWL4AI_MAX_TOKENS
-                        / max(1, (batch_index + 1) ** self.valves.TOKEN_DECAY_ALPHA)
-                    )
-
-                # Define coroutine that acquires semaphore before crawling
-                # (no status emission here – _crawl_url handles "Processing" and "Allocated")
-                async def process_batch(batch=batch, budget=budget):
-                    async with sem:
-                        # Small delay to soften request spikes
-                        await asyncio.sleep(0.2)
-                        return await self._crawl_url(
-                            urls=batch,
-                            query=query,
-                            token_budget=budget,
-                            skip_validation=True,
-                            __event_emitter__=__event_emitter__,
-                        )
-
-                batch_tasks.append(process_batch())
-
-            # Execute all batches concurrently
-            results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-
-            # Process each batch result
-            for batch_idx, crawled_batch in enumerate(results):
-                if isinstance(crawled_batch, Exception):
-                    logger.error(f"Batch crawl error: {crawled_batch}")
-                    continue
-
-                if not isinstance(crawled_batch, dict):
-                    continue
-
-                for img_url in crawled_batch.get("images", []):
-                    parsed_image = urlparse(img_url)
-                    base_image_url = f"{parsed_image.scheme}://{parsed_image.netloc}{parsed_image.path}"
-                    if base_image_url in seen_images:
-                        continue
-                    seen_images.add(base_image_url)
-                    thumbnail_url = (
-                        f"https://images.weserv.nl/?url={quote(img_url)}"
-                        f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
-                    )
-                    if await self._validate_image_url(
-                        img_url
-                    ) and await self._validate_image_url(thumbnail_url):
-                        image_list.append(img_url)
-
-                for vid_url in crawled_batch.get("videos", []):
-                    parsed_video = urlparse(vid_url)
-                    base_video_url = f"{parsed_video.scheme}://{parsed_video.netloc}{parsed_video.path}"
-                    if base_video_url in seen_videos:
-                        continue
-                    seen_videos.add(base_video_url)
-                    video_list.append(vid_url)
-
-                data_list = crawled_batch.get("content", [])
-                normalized_data_list = self._normalize_content(data_list)
-
-                if normalized_data_list:
-                    content_str = orjson.dumps(normalized_data_list).decode("utf-8")
-                    page_tokens = await self._count_tokens(content_str)
-
-                    # The budget that was passed is the effective limit
-                    budget_used = batches[batch_idx][1]  # index
-                    effective = (
-                        int(
-                            self.valves.CRAWL4AI_MAX_TOKENS
-                            / max(1, (budget_used + 1) ** self.valves.TOKEN_DECAY_ALPHA)
-                        )
-                        if self.valves.CRAWL4AI_MAX_TOKENS > 0
-                        else 0
-                    )
-                    if effective > 0 and page_tokens > effective:
-                        content_str = await self._truncate_content(
-                            content_str, effective
-                        )
-                        try:
-                            normalized_data_list = orjson.loads(
-                                content_str.replace(
-                                    "\n\n[Content truncated due to length...]", ""
-                                )
-                            )
-                        except Exception:
-                            pass
-                        page_tokens = effective
-
-                    async with self.stats_lock:
-                        total_tokens += page_tokens
-                        self.content_counter += 1
-                        self.crawl_counter += len(crawled_batch.get("content", []))
-                        crawl_results.extend(normalized_data_list)
-
-                    # Emit batch completion status (only here, not inside _crawl_url)
-                    if __event_emitter__ and self.valves.MORE_STATUS:
-                        async with self.status_lock:
-                            pages = self.content_counter
-                            total = self.total_urls
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": f"Analyzed {pages} page{'s' if pages != 1 else ''} from {total} URLs...",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": f"Used {page_tokens} tokens for this batch.",
-                                        "done": False,
-                                    },
-                                }
-                            )
-                    if self.valves.DEBUG:
-                        logger.debug(
-                            f"Used {page_tokens} tokens for batch of {len(batch)} URL(s)."
-                        )
-
+        # Normalize final results
         crawl_results = self._normalize_content(crawl_results)
 
-        if __event_emitter__ and (
-            self.user_valves.CRAWL4AI_DISPLAY_MEDIA
-            or self.valves.CRAWL4AI_DISPLAY_MEDIA
-        ):
-            max_items = self.valves.CRAWL4AI_MAX_MEDIA_ITEMS
-            image_list = image_list[:max_images] if max_images > 0 else image_list
-            video_list = video_list[:max_items] if max_items > 0 else video_list
+        # 3. Display media
+        await self._display_media(image_list, video_list, max_images, __event_emitter__)
 
-            if image_list:
-                image_markdown = ""
-                for img_url in image_list:
-                    if (
-                        self.user_valves.CRAWL4AI_DISPLAY_THUMBNAILS
-                        or self.valves.CRAWL4AI_DISPLAY_THUMBNAILS
-                    ):
-                        thumbnail_url = (
-                            f"https://images.weserv.nl/?url={quote(img_url)}"
-                            f"&w={thumbnail_size}&h={thumbnail_size}&fit=inside"
-                        )
-                    else:
-                        thumbnail_url = img_url
-                    image_markdown += f"[![image]({thumbnail_url})]({img_url})\n"
-                await __event_emitter__(
-                    {"type": "message", "data": {"content": image_markdown}}
-                )
+        # 4. Final status
+        await self._emit_final_status(crawl_results, start_time, __event_emitter__)
 
-            if video_list:
-                video_markdown = "\n\n*Videos links:*\n"
-                for idx, vid_url in enumerate(video_list, 1):
-                    video_markdown += f"{idx}. [{vid_url}]({vid_url})\n"
-                await __event_emitter__(
-                    {"type": "message", "data": {"content": video_markdown}}
-                )
+        # Close shared validation session
+        await self._close_validation_session()
 
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"Inspected {len(crawl_results)} web pages.",
-                        "done": True,
-                    },
-                }
-            )
-
-        elapsed = time.time() - start_time
-        elapsed_str = (
-            f"{elapsed:.2f} seconds" if elapsed < 60 else f"{elapsed/60:.2f} minutes"
+        logger.info(
+            f"Search and crawl finished in {time.time() - start_time:.2f} seconds"
         )
-        if __event_emitter__:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"⏱️ Elapsed time: {elapsed_str}",
-                        "done": True,
-                    },
-                }
-            )
-        logger.info(f"Search and crawl finished in {elapsed_str}")
         return crawl_results
 
     # endregion
@@ -2707,6 +3298,7 @@ Now evaluate these URLs:
     ) -> dict:
         """
         Internal function to crawl URLs and extract content (fully async with aiohttp).
+        Returns enriched results including raw markdown for caching.
         """
         if isinstance(urls, str):
             urls = [urls]
@@ -2722,7 +3314,13 @@ Now evaluate these URLs:
             )
 
         if not urls:
-            return {"content": [], "images": [], "videos": [], "links": []}
+            return {
+                "content": [],
+                "images": [],
+                "videos": [],
+                "links": [],
+                "raw_results": [],
+            }
 
         base_url = self.valves.CRAWL4AI_BASE_URL.rstrip("/")
         endpoint = f"{base_url}/crawl"
@@ -2788,7 +3386,6 @@ Now evaluate these URLs:
             exclude_external_images=self.valves.CRAWL4AI_EXCLUDE_IMAGES == "External",
         )
 
-        # Emit status (only if not inside a concurrent batch – handled by caller)
         if __event_emitter__ and self.valves.MORE_STATUS:
             description = (
                 f"Processing {len(urls)} URLs..."
@@ -2799,7 +3396,6 @@ Now evaluate these URLs:
                 {"type": "status", "data": {"description": description, "done": False}}
             )
 
-        # Notify token budget
         if token_budget is not None:
             msg = f"Allocated up to {token_budget} tokens for this page."
             logger.debug(msg)
@@ -2825,6 +3421,7 @@ Now evaluate these URLs:
                     data = await resp.json()
 
             results = []
+            raw_results = []  # store original markdown for caching
             seen_images = set()
             seen_videos = set()
             all_images = []
@@ -2837,6 +3434,10 @@ Now evaluate these URLs:
 
                 url = item.get("url", "")
                 parsed_url = urlparse(url)
+                markdown = item.get("markdown", None)  # Crawl4AI includes this
+
+                if markdown:
+                    raw_results.append({"url": url, "markdown": markdown})
 
                 image_list = []
                 for img in filter(
@@ -2973,7 +3574,6 @@ Now evaluate these URLs:
                         }
                     )
 
-            # After processing results, notify if nothing was extracted
             if not results:
                 if self.valves.DEBUG:
                     logger.debug(f"No content extracted from {urls}.")
@@ -2987,9 +3587,6 @@ Now evaluate these URLs:
                             },
                         }
                     )
-
-            # Note: content_counter is now updated by the caller (search_and_crawl)
-            # so we do not increment it here.
 
             if self.valves.DEBUG:
                 logger.info(f"Successfully crawled {len(results)} URLs")
@@ -3006,15 +3603,28 @@ Now evaluate these URLs:
                 "images": all_images or [],
                 "videos": all_videos or [],
                 "links": all_links if extract_links else [],
+                "raw_results": raw_results,
             }
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             error_msg = f"Cannot connect to Crawl4AI at {endpoint}: {str(e)}"
             logger.error(error_msg)
-            return {"error": error_msg, "content": [], "images": [], "videos": []}
+            return {
+                "error": error_msg,
+                "content": [],
+                "images": [],
+                "videos": [],
+                "raw_results": [],
+            }
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}\n{traceback.format_exc()}")
-            return {"content": [], "images": [], "videos": [], "links": []}
+            return {
+                "content": [],
+                "images": [],
+                "videos": [],
+                "links": [],
+                "raw_results": [],
+            }
 
     # endregion
 
@@ -3134,8 +3744,22 @@ Now evaluate these URLs:
                 if max_tokens > 0:
                     budget = int(
                         max_tokens
-                        / max(1, len(crawled_pages) ** self.valves.TOKEN_DECAY_ALPHA)
+                        / max(
+                            1,
+                            len(crawled_pages)
+                            ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
+                        )
                     )
+
+                # Skip if budget too low
+                if (
+                    budget is not None
+                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+                ):
+                    logger.debug(
+                        f"Skipping URL {url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                    )
+                    continue
 
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
@@ -3299,8 +3923,20 @@ Now evaluate these URLs:
             if max_tokens > 0:
                 budget = int(
                     max_tokens
-                    / max(1, len(crawled_pages) ** self.valves.TOKEN_DECAY_ALPHA)
+                    / max(
+                        1, len(crawled_pages) ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA
+                    )
                 )
+
+            # Skip if budget too low
+            if (
+                budget is not None
+                and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+            ):
+                logger.debug(
+                    f"Skipping URL {current_url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                )
+                continue
 
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
@@ -3487,8 +4123,22 @@ Now evaluate these URLs:
                 if max_tokens > 0:
                     budget = int(
                         max_tokens
-                        / max(1, len(crawled_pages) ** self.valves.TOKEN_DECAY_ALPHA)
+                        / max(
+                            1,
+                            len(crawled_pages)
+                            ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
+                        )
                     )
+
+                # Skip if budget too low
+                if (
+                    budget is not None
+                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+                ):
+                    logger.debug(
+                        f"Skipping URL {url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                    )
+                    continue
 
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
@@ -3620,7 +4270,7 @@ Now evaluate these URLs:
             "images": [],
             "videos": [],
             "sources": {},
-            "total_pages": 0,  # now counts attempted pages (passed validation)
+            "total_pages": 0,
             "tokens_used": 0,
         }
 
@@ -3645,7 +4295,7 @@ Now evaluate these URLs:
             if results["total_pages"] >= max_pages:
                 break
 
-            # Count this page as attempted (like the other research strategies)
+            # Count this page as attempted
             results["total_pages"] += 1
 
             # Token budget with decay
@@ -3653,8 +4303,22 @@ Now evaluate these URLs:
             if max_tokens > 0:
                 budget = int(
                     max_tokens
-                    / max(1, results["total_pages"] ** self.valves.TOKEN_DECAY_ALPHA)
+                    / max(
+                        1,
+                        results["total_pages"]
+                        ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
+                    )
                 )
+
+            # Skip source page if budget too low
+            if (
+                budget is not None
+                and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+            ):
+                logger.debug(
+                    f"Skipping source URL {source_url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                )
+                continue
 
             if __event_emitter__ and self.valves.MORE_STATUS:
                 await __event_emitter__(
@@ -3796,9 +4460,21 @@ Now evaluate these URLs:
                     budget = int(
                         max_tokens
                         / max(
-                            1, results["total_pages"] ** self.valves.TOKEN_DECAY_ALPHA
+                            1,
+                            results["total_pages"]
+                            ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
                         )
                     )
+
+                # Skip link if budget too low
+                if (
+                    budget is not None
+                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+                ):
+                    logger.debug(
+                        f"Skipping link {link}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                    )
+                    continue
 
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
@@ -3867,7 +4543,7 @@ Now evaluate these URLs:
                 results["images"].extend(link_result.get("images", []))
                 results["videos"].extend(link_result.get("videos", []))
 
-        # Final normalisation and sorting (unchanged)
+        # Final normalisation and sorting
         results["content"] = self._normalize_content(results["content"])
         results["content"].sort(
             key=lambda x: sum(
