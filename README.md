@@ -240,6 +240,8 @@ Please log any issues [on the GitHub repository](https://github.com/Zeioth/openw
 
 ## TODOS
 
-* Often, out of 10 search results, there is 1-2 of them highly superior in content. Therefore it's almost certain doing a second llm pass of those 1-2 best sites using extra tokens will increase the relevance of response considerably.
-* It would be extremenly valuable if we manage to create a simple ~~sqlite~~ chromadb cache of relevant/irrelevant sites for a given search concep. This should either improve search speed, and/or relevance (we should have some indicator of how much is enough content and when)
+* ~~Often, out of 10 search results, there is 1-2 of them highly superior in content. Therefore it's almost certain doing a second llm pass of those 1-2 best sites using extra tokens will increase the relevance of response considerably.~~ DONE
+* ~~It would be extremenly valuable if we manage to create a simple ~~sqlite~~ chromadb cache of relevant/irrelevant sites for a given search concep. This should either improve search speed, and/or relevance (we should have some indicator of how much is enough content and when)~~ DONE
 * ~~A more inmediate and simple approach would be further refining our (currently very simple ) semantic search matching.~~ DONE
+* Order the valves in a way that makes sense.
+* Re, create the readme including a flow diagram or how it works internally at conceptual level (and function calls).
