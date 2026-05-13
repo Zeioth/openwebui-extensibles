@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 2.8.21
+version: 2.8.20
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -24,6 +24,8 @@ import asyncio
 import uuid
 import hashlib
 import numpy as np
+import threading
+import torch
 from urllib.parse import parse_qs, urlparse, quote
 from pydantic import BaseModel, Field
 from typing import Any, List, Optional, Union, Callable, Literal, Tuple
@@ -495,6 +497,7 @@ class Tools:
         self._cache_locks: dict[str, asyncio.Lock] = {}
 
         self._embedder = None
+        self._embedder_lock = threading.Lock()
         self._chroma_client = None
         self._cache_collection = None
         self._validation_session: Optional[aiohttp.ClientSession] = None
@@ -586,11 +589,17 @@ class Tools:
 
     def _get_embedder(self):
         if self._embedder is None:
-            try:
-                self._embedder = SentenceTransformer("all-MiniLM-L6-v2")
-            except Exception as e:
-                logger.error(f"Failed to load SentenceTransformer: {e}")
-                raise
+            with self._embedder_lock:
+                if self._embedder is None:
+                    try:
+                        device = "cuda" if torch.cuda.is_available() else "cpu"
+                        self._embedder = SentenceTransformer(
+                            "all-MiniLM-L6-v2", device=device
+                        )
+                        logger.info(f"Embedder model loaded on {device}")
+                    except Exception as e:
+                        logger.error(f"Failed to load SentenceTransformer: {e}")
+                        raise
         return self._embedder
 
     def _get_chroma_client(self):
@@ -2862,16 +2871,17 @@ Now evaluate these URLs:
         thumbnail_size: int,
         __event_emitter__: Callable[[dict], Any],
     ) -> None:
-        """Processes results from Crawl4AI batches: cache, images, videos, content."""
+        """Processes results from Crawl4AI batches: cache, images, videos, and content (per page, in parallel)."""
+
+        # 1. Handle cache and media (non‑CPU intensive, done sequentially)
         for batch_idx, crawled_batch in enumerate(results):
             if isinstance(crawled_batch, Exception):
                 logger.error(f"Batch crawl error: {crawled_batch}")
                 continue
-
             if not isinstance(crawled_batch, dict):
                 continue
 
-            # Cache markdown from raw_results
+            # Cache markdown
             if self.valves.USE_PAGE_CACHE:
                 for result_entry in crawled_batch.get("raw_results", []):
                     url = result_entry.get("url")
@@ -2879,7 +2889,7 @@ Now evaluate these URLs:
                     if url and markdown:
                         await self._cache_page(url, markdown)
 
-            # Process images and videos from the batch result
+            # Images
             for img_url in crawled_batch.get("images", []):
                 parsed_image = urlparse(img_url)
                 base_image_url = (
@@ -2897,6 +2907,7 @@ Now evaluate these URLs:
                 ) and await self._validate_image_url(thumbnail_url):
                     image_list.append(img_url)
 
+            # Videos
             for vid_url in crawled_batch.get("videos", []):
                 parsed_video = urlparse(vid_url)
                 base_video_url = (
@@ -2907,43 +2918,26 @@ Now evaluate these URLs:
                 seen_videos.add(base_video_url)
                 video_list.append(vid_url)
 
-            # Process content from the batch
-            data_list = crawled_batch.get("content", [])
-            normalized_data_list = self._normalize_content(data_list)
-
-            if normalized_data_list:
-                content_str = orjson.dumps(normalized_data_list).decode("utf-8")
-                page_tokens = await self._count_tokens(content_str)
-
-                budget_used = batches[batch_idx][1]
-                effective = (
-                    int(
-                        self.valves.CRAWL4AI_MAX_TOKENS
-                        / max(
-                            1,
-                            (budget_used + 1) ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
-                        )
-                    )
-                    if self.valves.CRAWL4AI_MAX_TOKENS > 0
-                    else 0
+        # 2. Process every page across all batches in parallel
+        page_tasks = []
+        for batch_idx, crawled_batch in enumerate(results):
+            if isinstance(crawled_batch, Exception) or not isinstance(
+                crawled_batch, dict
+            ):
+                continue
+            for page_data in crawled_batch.get("content", []):
+                page_tasks.append(
+                    self._process_single_page(page_data, batch_idx, batches)
                 )
-                if effective > 0 and page_tokens > effective:
-                    content_str = await self._truncate_content(content_str, effective)
-                    try:
-                        normalized_data_list = orjson.loads(
-                            content_str.replace(
-                                "\n\n[Content truncated due to length...]", ""
-                            )
-                        )
-                    except Exception:
-                        pass
-                    page_tokens = effective
 
-                async with self.stats_lock:
-                    self.crawl_counter += len(crawled_batch.get("content", []))
-                    self.content_counter += 1
-                    crawl_results.extend(normalized_data_list)
-
+        if page_tasks:
+            processed = await asyncio.gather(*page_tasks)
+            for norm_content, token_count in processed:
+                if norm_content:
+                    async with self.stats_lock:
+                        crawl_results.extend(norm_content)
+                        self.crawl_counter += len(norm_content)  # items in this page
+                        self.content_counter += 1  # pages processed
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     async with self.status_lock:
                         pages = self.content_counter
@@ -2957,15 +2951,48 @@ Now evaluate these URLs:
                                 },
                             }
                         )
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"Used {page_tokens} tokens for this batch.",
-                                    "done": False,
-                                },
-                            }
+
+    async def _process_single_page(
+        self,
+        page_data: dict,
+        batch_idx: int,
+        batches: List[Tuple[List[str], int]],
+    ) -> Tuple[list, int]:
+        """
+        Normalise and token‑count a single page from a batch.
+        Returns (normalised_content_list, token_count).
+        """
+        content_list = page_data.get("content", [])
+        if not content_list:
+            return [], 0
+
+        norm = self._normalize_content(content_list)
+        if not norm:
+            return [], 0
+
+        content_str = orjson.dumps(norm).decode("utf-8")
+        tokens = await self._count_tokens(content_str)
+
+        # Token budget truncation
+        if self.valves.CRAWL4AI_MAX_TOKENS > 0:
+            budget_used = batches[batch_idx][1]
+            effective = int(
+                self.valves.CRAWL4AI_MAX_TOKENS
+                / max(1, (budget_used + 1) ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA)
+            )
+            if effective > 0 and tokens > effective:
+                content_str = await self._truncate_content(content_str, effective)
+                try:
+                    norm = orjson.loads(
+                        content_str.replace(
+                            "\n\n[Content truncated due to length...]", ""
                         )
+                    )
+                except Exception:
+                    pass
+                tokens = effective
+
+        return norm, tokens
 
     async def _run_research_crawl(
         self,
@@ -3129,6 +3156,17 @@ Now evaluate these URLs:
                     },
                 }
             )
+
+        # Preload embedder model in background if not already loaded
+        if self._embedder is None:
+
+            async def preload_embedder():
+                try:
+                    await anyio.to_thread.run_sync(self._get_embedder)
+                except Exception:
+                    pass  # will load on first use if preload fails
+
+            asyncio.create_task(preload_embedder())
 
         # Reset counters
         self.crawl_counter = 0
