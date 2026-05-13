@@ -552,6 +552,9 @@ class Tools:
             },
         ]
 
+    def as_tools(self) -> list[dict]:
+        return self.tools
+
     def _get_embedder(self):
         if self._embedder is None:
             try:
@@ -1726,12 +1729,15 @@ class Tools:
                         )
                         if general_ok and anchor_ok
                     ]
-                    # Fallback: if strict filtering removed all URLs, keep those that passed general check
-                    if not strict_urls:
+                    # Fallback: if strict filtering leaves too few URLs, keep those that passed general check
+                    MIN_STRICT_URLS = (
+                        3  # minimum acceptable number of URLs after strict filter
+                    )
+                    if len(strict_urls) < MIN_STRICT_URLS:
                         urls = [url for url, ok in zip(urls, general_results) if ok]
                         if self.valves.DEBUG:
                             logger.info(
-                                "Anchor keyword check removed all URLs; falling back to general keyword check only"
+                                f"Anchor keyword check left only {len(strict_urls)} URLs (<{MIN_STRICT_URLS}); falling back to general keyword check only"
                             )
                     else:
                         urls = strict_urls
