@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.4
+version: 3.0.5
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -1382,6 +1382,7 @@ class Tools:
             # Start filter task in background if enabled; initially mark all as relevant
             if self.valves.CACHE_FILTER_ENABLED:
                 asyncio.create_task(self._filter_and_update_cache(url, chunks.copy()))
+                logger.info(f"Started background cache filter for {url}")
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
