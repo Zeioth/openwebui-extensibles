@@ -1466,7 +1466,11 @@ class Tools:
                     cache_hit_urls += 1
                     for chunk in chunks:
                         cached_results.append(
-                            {"topic": f"From cache: {url}", "summary": chunk}
+                            {
+                                "topic": f"From cache: {url}",
+                                "summary": chunk,
+                                "source": url,
+                            }
                         )
                         cache_hit_chunks += 1
                 else:
@@ -2936,9 +2940,13 @@ Now evaluate these URLs:
                 crawled_batch, dict
             ):
                 continue
-            for page_data in crawled_batch.get("content", []):
+            raw_results = crawled_batch.get("raw_results", [])
+            for idx, page_data in enumerate(crawled_batch.get("content", [])):
+                source_url = ""
+                if idx < len(raw_results):
+                    source_url = raw_results[idx].get("url", "")
                 page_tasks.append(
-                    self._process_single_page(page_data, batch_idx, batches)
+                    self._process_single_page(page_data, batch_idx, batches, source_url)
                 )
 
         if page_tasks:
@@ -2968,6 +2976,7 @@ Now evaluate these URLs:
         page_data: dict,
         batch_idx: int,
         batches: List[Tuple[List[str], int]],
+        source_url: str = "",
     ) -> Tuple[list, int]:
         """
         Normalise and token‑count a single page from a batch.
@@ -3002,6 +3011,12 @@ Now evaluate these URLs:
                 except Exception:
                     pass
                 tokens = effective
+
+        # Attach source URL if available
+        if source_url:
+            for item in norm:
+                if isinstance(item, dict):
+                    item["source"] = source_url
 
         return norm, tokens
 
