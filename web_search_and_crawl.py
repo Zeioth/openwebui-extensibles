@@ -2789,6 +2789,18 @@ Now evaluate these URLs:
             __event_emitter__=__event_emitter__,
         )
 
+        # If accessibility removed all URLs, inform user to increase semantic filter
+        if not gathered_urls and __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "⚠️ No URLs passed accessibility check. Consider increasing 'Semantic Filter Top K' to obtain more candidate URLs.",
+                        "done": False,
+                    },
+                }
+            )
+
         cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks = (
             await self._handle_cache_and_split(gathered_urls, query, __event_emitter__)
         )
