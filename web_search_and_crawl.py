@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.2
+version: 3.0.3
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -312,6 +312,11 @@ class Tools:
             default=True,
             title="Filter Cache with LLM",
             description="If enabled, each cached page's chunks will be classified by an LLM as relevant or not. Only relevant chunks will be served from cache later.",
+        )
+        CACHE_REINDEX: bool = Field(
+            default=False,
+            title="Reindex Cache",
+            description="Set to true to trigger a one‑time re‑evaluation of all cached chunks using the LLM filter. After completion it will be set back to false automatically.",
         )
 
         # ── Feature Parameters ───────────────────────────────────────────────
@@ -1374,7 +1379,9 @@ class Tools:
 
             # Start filter task in background if enabled; initially mark all as relevant
             if self.valves.CACHE_FILTER_ENABLED:
-                asyncio.create_task(self._filter_and_update_cache(url, chunks.copy()))
+                asyncio.create_task(
+                    self._filter_and_update_cache(url, chunks.copy())
+                )
 
             embeddings = self._get_embedder().encode(chunks, convert_to_numpy=True)
             now = time.time()
@@ -1415,9 +1422,7 @@ class Tools:
         try:
             relevance = await self._filter_chunks_with_llm(chunks)
             if relevance is None or len(relevance) != len(chunks):
-                logger.warning(
-                    f"Cache filter for {url} returned invalid result; skipping update"
-                )
+                logger.warning(f"Cache filter for {url} returned invalid result; skipping update")
                 return
 
             # Update metadata in ChromaDB
@@ -1479,7 +1484,6 @@ class Tools:
                 timeout=60,
             )
             import json
-
             arr = json.loads(content)
             if isinstance(arr, list):
                 return [bool(v) for v in arr]
@@ -1516,17 +1520,12 @@ class Tools:
             # Filter out chunks marked as not relevant (if metadata available)
             if results["metadatas"]:
                 relevant_indices = [
-                    i
-                    for i, meta in enumerate(results["metadatas"])
-                    if meta.get(
-                        "relevant", True
-                    )  # default to relevant if metadata missing
+                    i for i, meta in enumerate(results["metadatas"])
+                    if meta.get("relevant", True)  # default to relevant if metadata missing
                 ]
                 if not relevant_indices:
                     return []
-                results["documents"] = [
-                    results["documents"][i] for i in relevant_indices
-                ]
+                results["documents"] = [results["documents"][i] for i in relevant_indices]
 
             if not results["documents"]:
                 return []
@@ -1571,11 +1570,7 @@ class Tools:
                     cache_hit_urls += 1
                     for chunk in chunks:
                         cached_results.append(
-                            {
-                                "topic": f"From cache: {url}",
-                                "summary": chunk,
-                                "source": url,
-                            }
+                            {"topic": f"From cache: {url}", "summary": chunk, "source": url}
                         )
                         cache_hit_chunks += 1
                 else:
@@ -1608,6 +1603,40 @@ class Tools:
                 )
 
         return cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks
+
+    async def _reindex_cache(self):
+        """Background task: re‑evaluate all cached chunks using the LLM filter."""
+        col = self._get_cache_collection()
+        if col is None:
+            return
+        try:
+            # Get all unique URLs from the collection
+            all_data = await anyio.to_thread.run_sync(col.get)
+            if not all_data or not all_data["ids"]:
+                logger.info("Cache reindex: collection is empty, nothing to do")
+                return
+
+            # Group by URL
+            url_to_metadatas = {}
+            for i, meta in enumerate(all_data["metadatas"]):
+                url = meta.get("url")
+                if url:
+                    url_to_metadatas.setdefault(url, []).append(i)
+
+            total_urls = len(url_to_metadatas)
+            processed = 0
+            for url, indices in url_to_metadatas.items():
+                chunks = [all_data["documents"][i] for i in indices]
+                await self._filter_and_update_cache(url, chunks)
+                processed += 1
+                if processed % 10 == 0:
+                    logger.info(f"Cache reindex: processed {processed}/{total_urls} URLs")
+            logger.info(f"Cache reindex complete: {processed} URLs re‑evaluated")
+
+            # Disable the reindex valve automatically
+            self.valves.CACHE_REINDEX = False
+        except Exception as e:
+            logger.error(f"Error during cache reindex: {e}")
 
     # endregion
 
@@ -3299,6 +3328,13 @@ Now evaluate these URLs:
                     pass  # will load on first use if preload fails
 
             asyncio.create_task(preload_embedder())
+
+        # Trigger cache reindex if valve is set
+        if self.valves.CACHE_REINDEX:
+            logger.info("Cache reindex triggered by valve")
+            asyncio.create_task(self._reindex_cache())
+            # Reset valve after starting the task; next search won't reindex again
+            self.valves.CACHE_REINDEX = False
 
         # Reset counters
         self.crawl_counter = 0
