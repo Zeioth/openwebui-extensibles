@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.1
+version: 3.0.2
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -307,6 +307,11 @@ class Tools:
             default=True,
             title="Use Page Cache",
             description="Cache crawled page content to avoid re-crawling the same URL within TTL.",
+        )
+        CACHE_FILTER_ENABLED: bool = Field(
+            default=True,
+            title="Filter Cache with LLM",
+            description="If enabled, each cached page's chunks will be classified by an LLM as relevant or not. Only relevant chunks will be served from cache later.",
         )
 
         # ── Feature Parameters ───────────────────────────────────────────────
@@ -1367,6 +1372,10 @@ class Tools:
             if not chunks:
                 return
 
+            # Start filter task in background if enabled; initially mark all as relevant
+            if self.valves.CACHE_FILTER_ENABLED:
+                asyncio.create_task(self._filter_and_update_cache(url, chunks.copy()))
+
             embeddings = self._get_embedder().encode(chunks, convert_to_numpy=True)
             now = time.time()
             ids = [f"{url}#{i}" for i in range(len(chunks))]
@@ -1377,6 +1386,7 @@ class Tools:
                     "chunk_index": i,
                     "content_hash": content_hash,
                     "source": "crawl4ai",
+                    "relevant": True,  # default until filter updates it
                 }
                 for i in range(len(chunks))
             ]
@@ -1400,6 +1410,83 @@ class Tools:
             if url in self._cache_locks and not self._cache_locks[url].locked():
                 del self._cache_locks[url]
 
+    async def _filter_and_update_cache(self, url: str, chunks: List[str]):
+        """Background task: classify chunks and update their relevance in ChromaDB."""
+        try:
+            relevance = await self._filter_chunks_with_llm(chunks)
+            if relevance is None or len(relevance) != len(chunks):
+                logger.warning(
+                    f"Cache filter for {url} returned invalid result; skipping update"
+                )
+                return
+
+            # Update metadata in ChromaDB
+            lock = self._cache_locks.get(url)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._cache_locks[url] = lock
+
+            async with lock:
+                col = self._get_cache_collection()
+                # Get existing chunks IDs for this URL
+                existing = await anyio.to_thread.run_sync(
+                    lambda: col.get(where={"url": url})
+                )
+                if not existing or not existing["ids"]:
+                    return
+
+                ids = existing["ids"]
+                metadatas = existing["metadatas"]
+                for idx, meta in enumerate(metadatas):
+                    chunk_idx = meta.get("chunk_index", idx)
+                    if chunk_idx < len(relevance):
+                        meta["relevant"] = relevance[chunk_idx]
+
+                # Update the collection in place
+                await anyio.to_thread.run_sync(
+                    lambda: col.update(ids=ids, metadatas=metadatas)
+                )
+            logger.debug(f"Updated relevance for {len(chunks)} chunks of {url}")
+        except Exception as e:
+            logger.error(f"Error in background cache filter for {url}: {e}")
+
+    async def _filter_chunks_with_llm(self, chunks: List[str]) -> Optional[List[bool]]:
+        """
+        Send all chunks to a small LLM to classify each as relevant (true) or noise (false).
+        Returns a list of booleans with the same length as chunks, or None on failure.
+        """
+        if not chunks:
+            return []
+
+        prompt = (
+            "You are a quality filter for web page text fragments. "
+            "For each fragment, decide if it contains useful information for future searches "
+            "(true) or is just navigation, ads, cookie notices, or other noise (false). "
+            "Return ONLY a JSON array of booleans, one per fragment.\n\nFragments:\n"
+        )
+        for i, chunk in enumerate(chunks):
+            prompt += f"{i}: {chunk[:500]}\n"  # limit length to save tokens
+        prompt += "\nJSON array (no other text):"
+
+        try:
+            provider = self.valves.FILTER_LLM_PROVIDER or self.valves.LLM_PROVIDER
+            content = await self._call_llm(
+                prompt=prompt,
+                system="Return only a JSON array of booleans. No other text.",
+                provider=provider,
+                temperature=0.0,
+                max_tokens=2000,
+                timeout=60,
+            )
+            import json
+
+            arr = json.loads(content)
+            if isinstance(arr, list):
+                return [bool(v) for v in arr]
+        except Exception as e:
+            logger.warning(f"Chunk filter LLM error: {e}")
+        return None
+
     def _get_cached_chunks(
         self, url: str, query: str, max_chunks: int = 3
     ) -> List[str]:
@@ -1422,6 +1509,24 @@ class Tools:
                 # Stale, delete entire url cached chunks
                 self._get_cache_collection().delete(ids=results["ids"])
                 return []
+
+            if not results["documents"]:
+                return []
+
+            # Filter out chunks marked as not relevant (if metadata available)
+            if results["metadatas"]:
+                relevant_indices = [
+                    i
+                    for i, meta in enumerate(results["metadatas"])
+                    if meta.get(
+                        "relevant", True
+                    )  # default to relevant if metadata missing
+                ]
+                if not relevant_indices:
+                    return []
+                results["documents"] = [
+                    results["documents"][i] for i in relevant_indices
+                ]
 
             if not results["documents"]:
                 return []
@@ -2933,7 +3038,7 @@ Now evaluate these URLs:
                 seen_videos.add(base_video_url)
                 video_list.append(vid_url)
 
-        # 2. Process every page across all batches in parallel
+        # 2. Process every page across all batches in parallel, attaching source URL
         page_tasks = []
         for batch_idx, crawled_batch in enumerate(results):
             if isinstance(crawled_batch, Exception) or not isinstance(
