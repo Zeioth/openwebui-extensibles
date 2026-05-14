@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.0
+version: 3.0.1
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -25,7 +25,6 @@ import uuid
 import hashlib
 import numpy as np
 import threading
-import torch
 from urllib.parse import parse_qs, urlparse, quote
 from pydantic import BaseModel, Field
 from typing import Any, List, Optional, Union, Callable, Literal, Tuple
@@ -62,6 +61,10 @@ except ImportError:
     )
 
 # endregion
+
+# ── Global singleton for SentenceTransformer ─────────────────────────────────
+_EMBEDDER_INSTANCE = None
+_EMBEDDER_LOCK = threading.Lock()
 
 # region ── Models ─────────────────────────────────────────────────────────────
 
@@ -496,8 +499,6 @@ class Tools:
         self.status_lock = asyncio.Lock()
         self._cache_locks: dict[str, asyncio.Lock] = {}
 
-        self._embedder = None
-        self._embedder_lock = threading.Lock()
         self._chroma_client = None
         self._cache_collection = None
         self._validation_session: Optional[aiohttp.ClientSession] = None
@@ -588,19 +589,17 @@ class Tools:
         return self.tools
 
     def _get_embedder(self):
-        if self._embedder is None:
-            with self._embedder_lock:
-                if self._embedder is None:
+        global _EMBEDDER_INSTANCE
+        if _EMBEDDER_INSTANCE is None:
+            with _EMBEDDER_LOCK:
+                if _EMBEDDER_INSTANCE is None:
                     try:
-                        device = "cuda" if torch.cuda.is_available() else "cpu"
-                        self._embedder = SentenceTransformer(
-                            "all-MiniLM-L6-v2", device=device
-                        )
-                        logger.info(f"Embedder model loaded on {device}")
+                        _EMBEDDER_INSTANCE = SentenceTransformer("all-MiniLM-L6-v2")
+                        logger.info("Embedder model loaded (singleton)")
                     except Exception as e:
                         logger.error(f"Failed to load SentenceTransformer: {e}")
                         raise
-        return self._embedder
+        return _EMBEDDER_INSTANCE
 
     def _get_chroma_client(self):
         if self._chroma_client is None:
@@ -3158,7 +3157,8 @@ Now evaluate these URLs:
             )
 
         # Preload embedder model in background if not already loaded
-        if self._embedder is None:
+        global _EMBEDDER_INSTANCE
+        if _EMBEDDER_INSTANCE is None:
 
             async def preload_embedder():
                 try:
