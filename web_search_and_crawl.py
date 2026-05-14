@@ -316,7 +316,7 @@ class Tools:
         CACHE_REINDEX: bool = Field(
             default=False,
             title="Reindex Cache",
-            description="Set to true to trigger a one‑time re‑evaluation of all cached chunks using the LLM filter. After completion it will be set back to false automatically.",
+            description="Set to true and then perform any search to trigger a one‑time re‑evaluation of all cached chunks using the LLM filter. After completion it will be set back to false automatically.",
         )
 
         # ── Feature Parameters ───────────────────────────────────────────────
