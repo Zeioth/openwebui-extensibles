@@ -1330,9 +1330,7 @@ class Tools:
 
         return chunks
 
-    async def _cache_page(
-        self, url: str, markdown: Any, __event_emitter__: Callable[[dict], Any] = None
-    ):
+    async def _cache_page(self, url: str, markdown: Any, __event_emitter__: Callable[[dict], Any] = None):
         """Store page chunks with embeddings and timestamp in the persistent collection."""
         # Only cache if markdown is a non-empty string; otherwise skip silently
         if not isinstance(markdown, str):
@@ -1430,19 +1428,12 @@ class Tools:
             if url in self._cache_locks and not self._cache_locks[url].locked():
                 del self._cache_locks[url]
 
-    async def _filter_and_update_cache(
-        self,
-        url: str,
-        chunks: List[str],
-        __event_emitter__: Callable[[dict], Any] = None,
-    ):
+    async def _filter_and_update_cache(self, url: str, chunks: List[str], __event_emitter__: Callable[[dict], Any] = None):
         """Background task: classify chunks and update their relevance in ChromaDB."""
         try:
             relevance = await self._filter_chunks_with_llm(chunks)
             if relevance is None or len(relevance) != len(chunks):
-                logger.warning(
-                    f"Cache filter for {url} returned invalid result; skipping update"
-                )
+                logger.warning(f"Cache filter for {url} returned invalid result; skipping update")
                 return
 
             # Update metadata in ChromaDB
@@ -1524,7 +1515,6 @@ class Tools:
                 timeout=60,
             )
             import json
-
             arr = json.loads(content)
             if isinstance(arr, list):
                 return [bool(v) for v in arr]
@@ -1561,17 +1551,12 @@ class Tools:
             # Filter out chunks marked as not relevant (if metadata available)
             if results["metadatas"]:
                 relevant_indices = [
-                    i
-                    for i, meta in enumerate(results["metadatas"])
-                    if meta.get(
-                        "relevant", True
-                    )  # default to relevant if metadata missing
+                    i for i, meta in enumerate(results["metadatas"])
+                    if meta.get("relevant", True)  # default to relevant if metadata missing
                 ]
                 if not relevant_indices:
                     return []
-                results["documents"] = [
-                    results["documents"][i] for i in relevant_indices
-                ]
+                results["documents"] = [results["documents"][i] for i in relevant_indices]
 
             if not results["documents"]:
                 return []
@@ -1616,11 +1601,7 @@ class Tools:
                     cache_hit_urls += 1
                     for chunk in chunks:
                         cached_results.append(
-                            {
-                                "topic": f"From cache: {url}",
-                                "summary": chunk,
-                                "source": url,
-                            }
+                            {"topic": f"From cache: {url}", "summary": chunk, "source": url}
                         )
                         cache_hit_chunks += 1
                 else:
@@ -1701,9 +1682,7 @@ class Tools:
                 await self._filter_and_update_cache(url, chunks, __event_emitter__)
                 processed += 1
                 if processed % 10 == 0:
-                    logger.info(
-                        f"Cache reindex: processed {processed}/{total_urls} URLs"
-                    )
+                    logger.info(f"Cache reindex: processed {processed}/{total_urls} URLs")
             logger.info(f"Cache reindex complete: {processed} URLs re‑evaluated")
 
             if __event_emitter__ and self.valves.MORE_STATUS:
@@ -2990,13 +2969,14 @@ Now evaluate these URLs:
         query: str,
         max_images: int,
         __event_emitter__: Callable[[dict], Any],
-    ) -> Tuple[List[dict], List[str], List[str]]:
-        """Executes normal crawl with cache and parallel batches."""
+    ) -> Tuple[List[dict], List[str], List[str], int]:
+        """Executes normal crawl with cache and parallel batches. Returns (results, images, videos, total_tokens)."""
         crawl_results = []
         image_list = []
         video_list = []
         seen_images = set()
         seen_videos = set()
+        total_tokens = 0
 
         thumbnail_size = (
             self.user_valves.CRAWL4AI_THUMBNAIL_SIZE
@@ -3076,7 +3056,7 @@ Now evaluate these URLs:
                 batch_tasks.append(process_batch())
 
             results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-            await self._process_batch_results(
+            total_tokens = await self._process_batch_results(
                 results,
                 batches,
                 query,
@@ -3089,7 +3069,7 @@ Now evaluate these URLs:
                 __event_emitter__,
             )
 
-        return crawl_results, image_list, video_list
+        return crawl_results, image_list, video_list, total_tokens
 
     async def _process_batch_results(
         self,
@@ -3103,8 +3083,9 @@ Now evaluate these URLs:
         crawl_results: List[dict],
         thumbnail_size: int,
         __event_emitter__: Callable[[dict], Any],
-    ) -> None:
-        """Processes results from Crawl4AI batches: cache, images, videos, and content (per page, in parallel)."""
+    ) -> int:
+        """Processes results from Crawl4AI batches: cache, images, videos, and content (per page, in parallel). Returns total tokens used."""
+        total_tokens = 0
 
         # 1. Handle cache and media (non‑CPU intensive, done sequentially)
         for batch_idx, crawled_batch in enumerate(results):
@@ -3173,6 +3154,7 @@ Now evaluate these URLs:
                 if norm_content:
                     async with self.stats_lock:
                         crawl_results.extend(norm_content)
+                        total_tokens += token_count
                         self.crawl_counter += len(norm_content)  # items in this page
                         self.content_counter += 1  # pages processed
                 if __event_emitter__ and self.valves.MORE_STATUS:
@@ -3188,6 +3170,8 @@ Now evaluate these URLs:
                                 },
                             }
                         )
+
+        return total_tokens
 
     async def _process_single_page(
         self,
@@ -3245,8 +3229,8 @@ Now evaluate these URLs:
         effective_crawl_mode: str,
         max_urls: int,
         __event_emitter__: Callable[[dict], Any],
-    ) -> Tuple[List[dict], List[str], List[str]]:
-        """Executes a research crawl using the selected strategy."""
+    ) -> Tuple[List[dict], List[str], List[str], int]:
+        """Executes a research crawl using the selected strategy. Returns (results, images, videos, total_tokens)."""
         crawl_results = []
         image_list = []
         video_list = []
@@ -3271,7 +3255,8 @@ Now evaluate these URLs:
         if "videos" in research_result:
             video_list.extend(research_result["videos"])
 
-        return crawl_results, image_list, video_list
+        # Research mode currently doesn't track tokens; return 0
+        return crawl_results, image_list, video_list, 0
 
     async def _display_media(
         self,
@@ -3531,11 +3516,11 @@ Now evaluate these URLs:
                         },
                     }
                 )
-            crawl_results, image_list, video_list = await self._run_research_crawl(
+            crawl_results, image_list, video_list, total_tokens = await self._run_research_crawl(
                 gathered_urls, query, effective_crawl_mode, max_urls, __event_emitter__
             )
         else:
-            crawl_results, image_list, video_list = await self._run_normal_crawl(
+            crawl_results, image_list, video_list, total_tokens = await self._run_normal_crawl(
                 gathered_urls, query, max_images, __event_emitter__
             )
 
@@ -3546,9 +3531,7 @@ Now evaluate these URLs:
         await self._display_media(image_list, video_list, max_images, __event_emitter__)
 
         # 4. Final status
-        await self._emit_final_status(
-            crawl_results, start_time, __event_emitter__, total_tokens
-        )
+        await self._emit_final_status(crawl_results, start_time, __event_emitter__, total_tokens)
 
         # Close shared validation session
         await self._close_validation_session()
