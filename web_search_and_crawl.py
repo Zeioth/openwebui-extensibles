@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismad, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.5
+version: 3.0.6
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -316,7 +316,7 @@ class Tools:
         CACHE_REINDEX: bool = Field(
             default=False,
             title="Reindex Cache",
-            description="Set to true to trigger a one‑time re‑evaluation of all cached chunks using the LLM filter. After completion it will be set back to false automatically.",
+            description="Set to true and then perform any search to trigger a one‑time re‑evaluation of all cached chunks using the LLM filter. After completion it will be set back to false automatically.",
         )
 
         # ── Feature Parameters ───────────────────────────────────────────────
@@ -1381,8 +1381,10 @@ class Tools:
 
             # Start filter task in background if enabled; initially mark all as relevant
             if self.valves.CACHE_FILTER_ENABLED:
-                asyncio.create_task(self._filter_and_update_cache(url, chunks.copy()))
                 logger.info(f"Started background cache filter for {url}")
+                asyncio.create_task(
+                    self._filter_and_update_cache(url, chunks.copy(), __event_emitter__)
+                )
                 if __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
@@ -1428,7 +1430,12 @@ class Tools:
             if url in self._cache_locks and not self._cache_locks[url].locked():
                 del self._cache_locks[url]
 
-    async def _filter_and_update_cache(self, url: str, chunks: List[str]):
+    async def _filter_and_update_cache(
+        self,
+        url: str,
+        chunks: List[str],
+        __event_emitter__: Callable[[dict], Any] = None,
+    ):
         """Background task: classify chunks and update their relevance in ChromaDB."""
         try:
             relevance = await self._filter_chunks_with_llm(chunks)
@@ -1464,9 +1471,29 @@ class Tools:
                 await anyio.to_thread.run_sync(
                     lambda: col.update(ids=ids, metadatas=metadatas)
                 )
-            logger.debug(f"Updated relevance for {len(chunks)} chunks of {url}")
+            logger.info(f"Finished background cache filter for {url}")
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🧠 Cache filter completed for {url}",
+                            "done": False,
+                        },
+                    }
+                )
         except Exception as e:
             logger.error(f"Error in background cache filter for {url}: {e}")
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"⚠️ Cache filter failed for {url}",
+                            "done": False,
+                        },
+                    }
+                )
 
     async def _filter_chunks_with_llm(self, chunks: List[str]) -> Optional[List[bool]]:
         """
@@ -1627,7 +1654,7 @@ class Tools:
 
         return cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks
 
-    async def _reindex_cache(self):
+    async def _reindex_cache(self, __event_emitter__: Callable[[dict], Any] = None):
         """Background task: re‑evaluate all cached chunks using the LLM filter."""
         col = self._get_cache_collection()
         if col is None:
@@ -1637,6 +1664,16 @@ class Tools:
             all_data = await anyio.to_thread.run_sync(col.get)
             if not all_data or not all_data["ids"]:
                 logger.info("Cache reindex: collection is empty, nothing to do")
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": "🔄 Cache reindex skipped (collection empty)",
+                                "done": False,
+                            },
+                        }
+                    )
                 return
 
             # Group by URL
@@ -1648,15 +1685,37 @@ class Tools:
 
             total_urls = len(url_to_metadatas)
             processed = 0
+            logger.info("Starting cache reindex (manual trigger)")
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "🔄 Reindexing cache with LLM filter...",
+                            "done": False,
+                        },
+                    }
+                )
             for url, indices in url_to_metadatas.items():
                 chunks = [all_data["documents"][i] for i in indices]
-                await self._filter_and_update_cache(url, chunks)
+                await self._filter_and_update_cache(url, chunks, __event_emitter__)
                 processed += 1
                 if processed % 10 == 0:
                     logger.info(
                         f"Cache reindex: processed {processed}/{total_urls} URLs"
                     )
             logger.info(f"Cache reindex complete: {processed} URLs re‑evaluated")
+
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"✅ Cache reindex complete ({processed} URLs re‑evaluated)",
+                            "done": False,
+                        },
+                    }
+                )
 
             # Disable the reindex valve automatically
             self.valves.CACHE_REINDEX = False
@@ -3271,6 +3330,7 @@ Now evaluate these URLs:
         crawl_results: List[dict],
         start_time: float,
         __event_emitter__: Callable[[dict], Any],
+        total_tokens: int = 0,
     ) -> None:
         """Emits final status messages (inspected pages, elapsed time)."""
         if __event_emitter__:
@@ -3283,6 +3343,16 @@ Now evaluate these URLs:
                     },
                 }
             )
+            if self.valves.MORE_STATUS and total_tokens > 0:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"Total tokens used: {total_tokens}",
+                            "done": True,
+                        },
+                    }
+                )
 
         elapsed = time.time() - start_time
         elapsed_str = (
@@ -3349,6 +3419,7 @@ Now evaluate these URLs:
             async def preload_embedder():
                 try:
                     await anyio.to_thread.run_sync(self._get_embedder)
+                    logger.info("Embedder model preloaded successfully in background")
                 except Exception:
                     pass  # will load on first use if preload fails
 
@@ -3357,7 +3428,7 @@ Now evaluate these URLs:
         # Trigger cache reindex if valve is set
         if self.valves.CACHE_REINDEX:
             logger.info("Cache reindex triggered by valve")
-            asyncio.create_task(self._reindex_cache())
+            asyncio.create_task(self._reindex_cache(__event_emitter__))
             # Reset valve after starting the task; next search won't reindex again
             self.valves.CACHE_REINDEX = False
 
@@ -3475,7 +3546,9 @@ Now evaluate these URLs:
         await self._display_media(image_list, video_list, max_images, __event_emitter__)
 
         # 4. Final status
-        await self._emit_final_status(crawl_results, start_time, __event_emitter__)
+        await self._emit_final_status(
+            crawl_results, start_time, __event_emitter__, total_tokens
+        )
 
         # Close shared validation session
         await self._close_validation_session()
