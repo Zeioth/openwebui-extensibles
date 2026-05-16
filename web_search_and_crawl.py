@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.1.3
+version: 3.1.4
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -3397,7 +3397,7 @@ Now evaluate these URLs:
                                     {
                                         "type": "status",
                                         "data": {
-                                            "description": f"Batch {batch_index+1}: Allocated a budget up to {budget} tokens.",
+                                            "description": f"Batch {batch_index+1}: Allocated a budget up to {budget} tokens (global limit {max_tokens}).",
                                             "done": False,
                                         },
                                     }
@@ -3436,6 +3436,20 @@ Now evaluate these URLs:
                 thumbnail_size,
                 __event_emitter__,
             )
+
+            # Check if total token limit reached
+            if max_tokens > 0 and total_tokens >= max_tokens:
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⏭️ Crawl stopped: total tokens ({total_tokens}) reached the maximum limit ({max_tokens}).",
+                                "done": False,
+                            },
+                        }
+                    )
+
             # Collect links from results and attach depth if provided
             for batch_idx, crawled_batch in enumerate(results):
                 if isinstance(crawled_batch, dict):
@@ -3934,6 +3948,44 @@ Now evaluate these URLs:
                 }
             )
 
+    # ── Content deduplication ───────────────────────────────────────────
+    async def _deduplicate_content(self, items: List[dict]) -> List[dict]:
+        """Remove near‑duplicate content items based on semantic similarity.
+        Returns a new list with unique items.  Keeps the first occurrence of
+        each semantic cluster."""
+        if len(items) <= 1:
+            return items
+        try:
+            embedder = self._get_embedder()
+            if not embedder:
+                return items
+            summaries = [item.get("summary", "") for item in items]
+            if not summaries:
+                return items
+            embeddings = embedder.encode(summaries, convert_to_numpy=True)
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms[norms == 0] = 1
+            normalized = embeddings / norms
+            sim_matrix = np.dot(normalized, normalized.T)
+            keep_indices = []
+            for i in range(len(items)):
+                is_dup = False
+                for j in keep_indices:
+                    if sim_matrix[i, j] > 0.95:
+                        is_dup = True
+                        break
+                if not is_dup:
+                    keep_indices.append(i)
+            deduped = [items[i] for i in keep_indices]
+            if len(deduped) < len(items):
+                logger.info(
+                    f"Deduplication: kept {len(deduped)}/{len(items)} unique content items"
+                )
+            return deduped
+        except Exception as e:
+            logger.warning(f"Content deduplication failed: {e}")
+            return items
+
     async def search_and_crawl(
         self,
         query: str,
@@ -4112,6 +4164,9 @@ Now evaluate these URLs:
 
         # Normalize final results
         crawl_results = self._normalize_content(crawl_results)
+
+        # Deduplicate near-duplicate content fragments
+        crawl_results = await self._deduplicate_content(crawl_results)
 
         # 3. Display media
         await self._display_media(image_list, video_list, max_images, __event_emitter__)
@@ -4637,6 +4692,20 @@ Now evaluate these URLs:
             all_images.extend(result["images"])
             all_videos.extend(result["videos"])
 
+            # Check if total token limit reached
+            if max_tokens > 0 and total_tokens >= max_tokens:
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⏭️ Crawl stopped: total tokens ({total_tokens}) reached the maximum limit ({max_tokens}).",
+                                "done": False,
+                            },
+                        }
+                    )
+                break
+
             for link, new_depth in result.get("links_with_depth", []):
                 if new_depth > max_depth:
                     continue
@@ -4766,6 +4835,20 @@ Now evaluate these URLs:
             crawled_results.extend(result["content"])
             all_images.extend(result["images"])
             all_videos.extend(result["videos"])
+
+            # Check if total token limit reached
+            if max_tokens > 0 and total_tokens >= max_tokens:
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⏭️ Crawl stopped: total tokens ({total_tokens}) reached the maximum limit ({max_tokens}).",
+                                "done": False,
+                            },
+                        }
+                    )
+                break
 
             discovered_links = [
                 link
@@ -4941,6 +5024,20 @@ Now evaluate these URLs:
             all_images.extend(result["images"])
             all_videos.extend(result["videos"])
 
+            # Check if total token limit reached
+            if max_tokens > 0 and total_tokens >= max_tokens:
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⏭️ Crawl stopped: total tokens ({total_tokens}) reached the maximum limit ({max_tokens}).",
+                                "done": False,
+                            },
+                        }
+                    )
+                break
+
             for link, new_depth in result.get("links_with_depth", []):
                 if new_depth > max_depth:
                     continue
@@ -5042,6 +5139,20 @@ Now evaluate these URLs:
             results["images"].extend(crawl_result["images"])
             results["videos"].extend(crawl_result["videos"])
 
+            # Check total token limit
+            if max_tokens > 0 and total_tokens >= max_tokens:
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⏭️ Crawl stopped: total tokens ({total_tokens}) reached the maximum limit ({max_tokens}).",
+                                "done": False,
+                            },
+                        }
+                    )
+                break
+
             relevance_score = sum(
                 1 for kw in keywords if kw in str(crawl_result["content"]).lower()
             )
@@ -5105,6 +5216,20 @@ Now evaluate these URLs:
                 results["images"].extend(link_result["images"])
                 results["videos"].extend(link_result["videos"])
                 crawled_links_from_source += 1
+
+                # Check total token limit after each follow-up link
+                if max_tokens > 0 and total_tokens >= max_tokens:
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"⏭️ Crawl stopped: total tokens ({total_tokens}) reached the maximum limit ({max_tokens}).",
+                                    "done": False,
+                                },
+                            }
+                        )
+                    break
 
         results["content"] = self._normalize_content(results["content"])
         results["content"].sort(
