@@ -3504,19 +3504,23 @@ Now evaluate these URLs:
                     },
                 }
             )
-        result = await self._crawl_urls_with_cache(
-            urls=gathered_urls,
-            query=query,
-            max_tokens=self.valves.CRAWL4AI_MAX_TOKENS,
-            extract_links=False,
-            __event_emitter__=__event_emitter__,
-        )
-        return (
-            result["content"],
-            result["images"],
-            result["videos"],
-            result["tokens_used"],
-        )
+        try:
+            result = await self._crawl_urls_with_cache(
+                urls=gathered_urls,
+                query=query,
+                max_tokens=self.valves.CRAWL4AI_MAX_TOKENS,
+                extract_links=False,
+                __event_emitter__=__event_emitter__,
+            )
+            return (
+                result["content"],
+                result["images"],
+                result["videos"],
+                result["tokens_used"],
+            )
+        except Exception as e:
+            logger.error(f"Normal crawl failed: {e}\n{traceback.format_exc()}")
+            return [], [], [], 0
 
     async def _process_batch_results(
         self,
@@ -3535,7 +3539,9 @@ Now evaluate these URLs:
         Returns total tokens used."""
         total_tokens = 0
 
-        pages_attempted = 0
+        # Count attempted URLs from the batches themselves (sum of all batch lengths)
+        pages_attempted = sum(len(batch_urls) for batch_urls, _ in batches)
+
         filter_tasks = []  # collect background cache filter tasks
         for batch_idx, crawled_batch in enumerate(results):
             if isinstance(crawled_batch, Exception):
@@ -3543,8 +3549,6 @@ Now evaluate these URLs:
                 continue
             if not isinstance(crawled_batch, dict):
                 continue
-
-            pages_attempted += len(crawled_batch.get("content", []))
 
             # Cache markdown
             if self.valves.USE_PAGE_CACHE:
@@ -3609,6 +3613,9 @@ Now evaluate these URLs:
         per_batch_tokens = {}
         if page_tasks:
             processed = await asyncio.gather(*page_tasks)
+            # Initialize per_batch_tokens for all batches to 0
+            for batch_idx in set(b[1] for b in batches):
+                per_batch_tokens[batch_idx] = 0
             for norm_content, token_count, batch_idx in processed:
                 if norm_content:
                     async with self.stats_lock:
@@ -3616,24 +3623,23 @@ Now evaluate these URLs:
                         total_tokens += token_count
                         self.crawl_counter += len(norm_content)  # items in this page
                         self.content_counter += 1  # pages processed (fragments)
-                    per_batch_tokens[batch_idx] = (
-                        per_batch_tokens.get(batch_idx, 0) + token_count
-                    )
+                per_batch_tokens[batch_idx] += token_count
 
         # Wait for all background cache filter tasks to finish.
         if filter_tasks:
             await asyncio.gather(*filter_tasks, return_exceptions=True)
 
-        # Emit tokens per batch
+        # Emit tokens per batch (always show, even if 0)
         if __event_emitter__ and self.valves.MORE_STATUS:
             for batch_urls, batch_index in batches:
-                if batch_index in per_batch_tokens:
-                    tokens_batch = per_batch_tokens[batch_index]
-                    msg = f"Batch {batch_index+1} finished: Extracted {tokens_batch} tokens."
-                    await __event_emitter__(
-                        {"type": "status", "data": {"description": msg, "done": False}}
-                    )
-                    logger.info(msg)
+                tokens_batch = per_batch_tokens.get(batch_index, 0)
+                msg = (
+                    f"Batch {batch_index+1} finished: Extracted {tokens_batch} tokens."
+                )
+                await __event_emitter__(
+                    {"type": "status", "data": {"description": msg, "done": False}}
+                )
+                logger.info(msg)
 
         return total_tokens
 
@@ -3804,7 +3810,7 @@ Now evaluate these URLs:
                     },
                 }
             )
-            if self.valves.MORE_STATUS and total_tokens > 0:
+            if self.valves.MORE_STATUS:  # always show token total
                 await __event_emitter__(
                     {
                         "type": "status",
