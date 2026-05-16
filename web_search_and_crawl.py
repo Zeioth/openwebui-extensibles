@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.1.0
+version: 3.1.1
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -333,11 +333,13 @@ class Tools:
             default=5,
             description="Maximum number of related search terms to generate for query expansion.",
         )
-        SEMANTIC_FILTER_TOP_K: int = Field(
-            default=10,
+        SEMANTIC_FILTER_MAX_URLS: int = Field(
+            default=None,
             ge=1,
-            title="Semantic Filter Top K",
-            description="Number of top relevant URLs to keep after semantic filtering.",
+            title="Semantic Filter Max URLs",
+            description="Number of most relevant URLs to keep after semantic filtering. "
+            "Defaults to 10. The filter will never keep fewer than CRAWL4AI_MAX_URLS, "
+            "so raising the crawl limit also raises this filter's floor.",
         )
         CACHE_TTL_HOURS: int = Field(
             default=6,
@@ -1934,8 +1936,16 @@ class Tools:
             # Compute cosine similarity
             similarities = np.dot(doc_norms, query_norm.T).flatten()
 
-            # Select top_k
-            top_k = min(self.valves.SEMANTIC_FILTER_TOP_K, len(search_results))
+            # Determine effective limit: if SEMANTIC_FILTER_MAX_URLS is None, use CRAWL4AI_MAX_URLS
+            max_urls_limit = (
+                self.user_valves.CRAWL4AI_MAX_URLS or self.valves.CRAWL4AI_MAX_URLS
+            )
+            semantic_max = self.valves.SEMANTIC_FILTER_MAX_URLS
+            if semantic_max is None:
+                semantic_max = max_urls_limit
+            # Ensure we never keep fewer than the crawl max (no bottleneck)
+            effective_top_k = max(semantic_max, max_urls_limit)
+            top_k = min(effective_top_k, len(search_results))
             top_indices = np.argsort(similarities)[::-1][:top_k]
 
             filtered_urls = [search_results[i]["url"] for i in top_indices]
@@ -2380,8 +2390,7 @@ class Tools:
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> List[str]:
         """Call LLM with a light prompt to detect homonyms for the query.
-        Used when query expansion is disabled but homonym pre-filtering is desired.
-        """
+        Used when query expansion is disabled but homonym pre-filtering is desired."""
         if __event_emitter__ and self.valves.MORE_STATUS:
             await __event_emitter__(
                 {
@@ -2394,8 +2403,9 @@ class Tools:
             )
 
         prompt = f"""List homonyms (alternative meanings) that must be avoided when searching for: "{query}"
+Do NOT include the original query or its words. Only list terms whose meanings could be confused with the query.
 If none, return an empty array.
-Output ONLY a JSON array of strings. Example: ["fresadora", "fresa dental"]
+Output ONLY a JSON array of strings. Example for query "fresa": ["fresadora", "fresa dental"]
 """
         system_msg = "Return only a JSON array of homonyms. No other text."
 
@@ -2966,14 +2976,16 @@ Now evaluate these URLs:
                     i for i in range(len(urls)) if i not in keep_indices
                 ]
                 needed = min_urls - len(filtered_urls)
+                added = 0
                 for i in rejected_indices[:needed]:
                     filtered_urls.append(urls[i])
-                if __event_emitter__ and self.valves.MORE_STATUS:
+                    added += 1
+                if added > 0 and __event_emitter__ and self.valves.MORE_STATUS:
                     await __event_emitter__(
                         {
                             "type": "status",
                             "data": {
-                                "description": f"🧠 LLM filter: kept {len(filtered_urls)} URLs (added {needed} to meet minimum).",
+                                "description": f"🧠 LLM filter: kept {len(filtered_urls)} URLs (added {added} to meet minimum).",
                                 "done": False,
                             },
                         }
@@ -3186,6 +3198,7 @@ Now evaluate these URLs:
         max_tokens: int = 0,
         extract_links: bool = False,
         url_depths: Optional[List[int]] = None,
+        total_remaining: Optional[int] = None,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> dict:
         """
@@ -3193,6 +3206,8 @@ Now evaluate these URLs:
         If url_depths is provided, it must have the same length as urls,
         and the returned 'links_with_depth' will contain (link, depth) pairs
         where depth = parent_depth + 1.
+        If total_remaining is provided, it is used in the status message
+        to show how many URLs are left in the overall crawl.
         Returns dict with keys:
             content (list), images (list), videos (list),
             links (list of str) or links_with_depth (list of (str, int)),
@@ -3220,14 +3235,12 @@ Now evaluate these URLs:
 
         total_processing = cache_hit_urls + len(uncached_urls)
         if __event_emitter__ and self.valves.MORE_STATUS:
+            if total_remaining is not None:
+                msg = f"🔍 Processing batch of {total_processing} URLs ({total_remaining} total remaining in this crawl)..."
+            else:
+                msg = f"🔍 Processing {total_processing} most relevant results ({cache_hit_urls} from cache, {len(uncached_urls)} to crawl)..."
             await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"🔍 Processing {total_processing} most relevant results ({cache_hit_urls} from cache, {len(uncached_urls)} to crawl)...",
-                        "done": False,
-                    },
-                }
+                {"type": "status", "data": {"description": msg, "done": False}}
             )
 
         if cached_results:
@@ -3392,6 +3405,32 @@ Now evaluate these URLs:
             search_queries, __event_emitter__, __user__
         )
 
+        # Apply static validation (excluded domains, invalid URLs, accessibility) BEFORE other filters
+        if search_results:
+            all_urls = [r["url"] for r in search_results]
+            valid_urls = await self._validate_url_pipeline(
+                all_urls,
+                query,
+                check_accessibility=True,
+                check_keywords=False,
+                __event_emitter__=__event_emitter__,
+            )
+            valid_set = set(valid_urls)
+            search_results = [r for r in search_results if r["url"] in valid_set]
+
+        if not search_results:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"No valid URLs found for query '{query}' after static validation.",
+                            "done": True,
+                        },
+                    }
+                )
+            return [], []
+
         if homonym_task:
             self._detected_homonyms = await homonym_task
 
@@ -3442,48 +3481,7 @@ Now evaluate these URLs:
                 __event_emitter__=__event_emitter__,
             )
 
-        # Validation (static keyword check if enabled, otherwise accessibility only)
-        if self.valves.STATIC_URL_VALIDATION:
-            gathered_urls = await self._validate_url_pipeline(
-                gathered_urls,
-                query,
-                check_accessibility=True,
-                check_keywords=True,
-                __event_emitter__=__event_emitter__,
-            )
-            if not gathered_urls:
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"No valid URLs found for query '{query}' after static validation.",
-                                "done": True,
-                            },
-                        }
-                    )
-                return [], []
-        else:
-            gathered_urls = await self._validate_url_pipeline(
-                gathered_urls,
-                query,
-                check_accessibility=True,
-                check_keywords=False,
-                __event_emitter__=__event_emitter__,
-            )
-            if not gathered_urls:
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"No accessible URLs found for query '{query}'.",
-                                "done": True,
-                            },
-                        }
-                    )
-                return [], []
-
+        # (No further static validation here – already done at the beginning)
         return gathered_urls, user_provided_urls
 
     async def _run_normal_crawl(
@@ -4434,7 +4432,7 @@ Now evaluate these URLs:
         total_tokens = 0
 
         queue = deque()
-        for url in start_urls[:5]:
+        for url in start_urls[:max_urls]:
             if url not in crawled_pages:
                 score = sum(1 for kw in keywords if kw in url.lower())
                 queue.append((url, 0, score))
@@ -4492,12 +4490,16 @@ Now evaluate these URLs:
             if not urls_to_crawl:
                 continue
 
+            # Calculate remaining URLs in the queue after this batch
+            remaining = len(queue)  # queue already had batch items popped
+
             result = await self._crawl_urls_with_cache(
                 urls=urls_to_crawl,
                 query=query,
                 max_tokens=max_tokens,
                 extract_links=True,
                 url_depths=url_depths,
+                total_remaining=remaining,
                 __event_emitter__=__event_emitter__,
             )
             total_tokens += result["tokens_used"]
@@ -4512,8 +4514,6 @@ Now evaluate these URLs:
                     continue
                 if not self._is_valid_crawl_url(link):
                     continue
-                parsed_link = urlparse(link)
-                # domain restriction: we don't have the original domain easily; skip for now
                 link_score = sum(1 for kw in keywords if kw in link.lower())
                 if link_score > 0:
                     queue.append((link, new_depth, link_score))
@@ -4590,12 +4590,15 @@ Now evaluate these URLs:
 
             crawled_pages.add(current_url)
 
+            remaining = len(urls_to_process)
+
             result = await self._crawl_urls_with_cache(
                 urls=[current_url],
                 query=query,
                 max_tokens=max_tokens,
                 extract_links=True,
                 url_depths=[0],
+                total_remaining=remaining,
                 __event_emitter__=__event_emitter__,
             )
             total_tokens += result["tokens_used"]
@@ -4681,7 +4684,9 @@ Now evaluate these URLs:
 
         base_domain = urlparse(start_urls[0]).netloc if start_urls else ""
 
-        queue = deque((url, 0) for url in start_urls[:5] if url not in crawled_pages)
+        queue = deque(
+            (url, 0) for url in start_urls[:max_urls] if url not in crawled_pages
+        )
         self.total_urls = max_pages
 
         while (
@@ -4729,12 +4734,15 @@ Now evaluate these URLs:
             if not urls_to_crawl:
                 continue
 
+            remaining = len(queue)
+
             result = await self._crawl_urls_with_cache(
                 urls=urls_to_crawl,
                 query=query,
                 max_tokens=max_tokens,
                 extract_links=True,
                 url_depths=url_depths,
+                total_remaining=remaining,
                 __event_emitter__=__event_emitter__,
             )
             total_tokens += result["tokens_used"]
@@ -4801,7 +4809,7 @@ Now evaluate these URLs:
         total_tokens = 0
         round_num = 0
 
-        for source_url in start_urls[:5]:
+        for source_url in start_urls[:max_urls]:
             round_num += 1
             validated = await self._validate_url_pipeline(
                 [source_url],
@@ -4828,12 +4836,15 @@ Now evaluate these URLs:
 
             results["total_pages"] += 1
 
+            remaining = max_pages - results["total_pages"]
+
             crawl_result = await self._crawl_urls_with_cache(
                 urls=[source_url],
                 query=query,
                 max_tokens=max_tokens,
                 extract_links=True,
                 url_depths=[0],
+                total_remaining=remaining,
                 __event_emitter__=__event_emitter__,
             )
             total_tokens += crawl_result["tokens_used"]
@@ -4889,12 +4900,14 @@ Now evaluate these URLs:
                     continue
 
                 results["total_pages"] += 1
+                remaining = max_pages - results["total_pages"]
 
                 link_result = await self._crawl_urls_with_cache(
                     urls=[link],
                     query=query,
                     max_tokens=max_tokens,
                     extract_links=False,
+                    total_remaining=remaining,
                     __event_emitter__=__event_emitter__,
                 )
                 total_tokens += link_result["tokens_used"]
