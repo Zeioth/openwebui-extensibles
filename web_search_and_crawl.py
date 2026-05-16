@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.1.1
+version: 3.1.2
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -337,9 +337,9 @@ class Tools:
             default=None,
             ge=1,
             title="Semantic Filter Max URLs",
-            description="Number of most relevant URLs to keep after semantic filtering. "
-            "Defaults to 10. The filter will never keep fewer than CRAWL4AI_MAX_URLS, "
-            "so raising the crawl limit also raises this filter's floor.",
+            description="Maximum URLs kept after semantic filtering. "
+            "Defaults to the same value as CRAWL4AI_MAX_URLS. "
+            "The filter never keeps fewer than CRAWL4AI_MAX_URLS.",
         )
         CACHE_TTL_HOURS: int = Field(
             default=6,
@@ -1406,6 +1406,101 @@ class Tools:
 
         return chunks
 
+    # ── Heuristic noise filter for cached chunks ──────────────────────────
+    _NOISE_KEYWORDS = {
+        "cookie",
+        "cookies",
+        "analytics",
+        "session",
+        "ai_user",
+        "ai_session",
+        "google analytics",
+        "microsoft clarity",
+        "azure",
+        "tracking",
+        "gdpr",
+        "consent",
+        "banner",
+        "popup",
+        "subscribe",
+        "newsletter",
+        "advertisement",
+        "sponsored",
+        "marketing",
+        "promotional",
+        "footer",
+        "sidebar",
+        "navigation",
+        "login",
+        "signup",
+        "register",
+        "cart",
+        "checkout",
+        "wishlist",
+        "privacidad",
+        "términos",
+        "condiciones",
+        "uso de cookies",
+    }
+
+    def _get_query_words(self, query: str) -> set:
+        """Extract significant words from a query for heuristic filtering."""
+        words = re.findall(r"\w+", query.lower())
+        stopwords = {
+            "de",
+            "la",
+            "el",
+            "los",
+            "las",
+            "del",
+            "en",
+            "y",
+            "o",
+            "un",
+            "una",
+            "the",
+            "of",
+            "and",
+            "or",
+            "a",
+            "an",
+            "is",
+            "que",
+            "se",
+            "su",
+            "con",
+            "por",
+            "para",
+            "al",
+            "lo",
+            "como",
+            "una",
+            "para",
+            "por",
+            "con",
+            "sin",
+            "sobre",
+            "entre",
+            "hacia",
+            "hasta",
+            "desde",
+            "durante",
+            "mediante",
+        }
+        return {w for w in words if len(w) > 2 and w not in stopwords}
+
+    def _is_noise_chunk(self, chunk: str, query_words: set) -> bool:
+        """Heuristically detect chunks that are clearly noise (cookies, analytics, etc.)
+        and not related to the query. Returns True if the chunk should be discarded."""
+        if not query_words:
+            return False
+        lower = chunk.lower()
+        has_noise = any(kw in lower for kw in self._NOISE_KEYWORDS)
+        if not has_noise:
+            return False
+        has_query_words = any(qw in lower for qw in query_words)
+        return not has_query_words
+
     async def _cache_page(
         self, url: str, markdown: Any, __event_emitter__: Callable[[dict], Any] = None
     ):
@@ -1705,6 +1800,17 @@ class Tools:
             if not results["documents"]:
                 return []
 
+            # ── Heuristic noise filter: discard chunks that are clearly noise ─
+            query_words = self._get_query_words(query)
+            if query_words:
+                filtered = [
+                    doc
+                    for doc in results["documents"]
+                    if not self._is_noise_chunk(doc, query_words)
+                ]
+                if filtered:
+                    results["documents"] = filtered
+
             # Filter out chunks marked as not relevant (if metadata available)
             if results["metadatas"]:
                 relevant_indices = [
@@ -1936,6 +2042,25 @@ class Tools:
             # Compute cosine similarity
             similarities = np.dot(doc_norms, query_norm.T).flatten()
 
+            # ── Wikipedia boost ────────────────────────────────────────────
+            # If the query explicitly asks for Wikipedia, give a slight boost to
+            # Wikipedia URLs so they rank higher.
+            query_lower = query.lower()
+            if "wikipedia" in query_lower or "wiki" in query_lower:
+                BOOST = 0.15
+                for i, r in enumerate(search_results):
+                    url = r.get("url", "")
+                    if "wikipedia.org" in url or "wiki" in url:
+                        similarities[i] += BOOST
+                        if similarities[i] > 1.0:
+                            similarities[i] = 1.0
+                if self.valves.DEBUG:
+                    boosted = sum(
+                        1 for r in search_results if "wikipedia.org" in r.get("url", "")
+                    )
+                    if boosted:
+                        logger.debug(f"Wikipedia boost applied to {boosted} URLs")
+
             # Determine effective limit: if SEMANTIC_FILTER_MAX_URLS is None, use CRAWL4AI_MAX_URLS
             max_urls_limit = (
                 self.user_valves.CRAWL4AI_MAX_URLS or self.valves.CRAWL4AI_MAX_URLS
@@ -1992,79 +2117,49 @@ class Tools:
                 return True
         return False
 
-    async def _deduplicate_wikipedia_urls(
+    async def _deduplicate_wikipedia_search_results(
         self,
-        urls: List[str],
+        search_results: List[dict],
         __user__: Optional[dict] = None,
-    ) -> List[str]:
+        __event_emitter__: Callable[[dict], Any] = None,
+    ) -> Tuple[List[dict], int]:
         """
-        Keep only one Wikipedia URL per unique article, regardless of language.
-        Prefer user's language (from __user__), then English, else first found.
-        Non‑Wikipedia URLs are kept untouched and preserve their relative order.
+        Deduplicate Wikipedia search results, keeping only one result per article.
+        Returns (deduped_results, number_of_removed_duplicates).
         """
         from urllib.parse import unquote
 
-        # User language (default: English)
         user_lang = "en"
         if __user__ and isinstance(__user__, dict):
             user_lang = __user__.get("language", "en") or "en"
 
-        # Mapping: normalized title -> (best_url, best_lang, first_url, first_lang)
-        articles: dict[str, dict[str, object]] = {}
-
-        for url in urls:
-            # Detect Wikipedia article URL
+        # Group by normalized title
+        articles: dict[str, dict] = {}
+        non_wikipedia = []
+        for r in search_results:
+            url = r.get("url", "")
             match = re.match(r"^https?://([a-z]+)\.wikipedia\.org/wiki/(.+)", url)
             if not match:
-                continue  # non‑Wikipedia URLs are simply kept
-
+                non_wikipedia.append(r)
+                continue
             lang = match.group(1)
             raw_title = match.group(2)
-            # Normalize: remove fragments, query strings, trailing slash
             title = unquote(raw_title).split("#")[0].split("?")[0].rstrip("/")
             if not title:
+                non_wikipedia.append(r)
                 continue
-
             if title not in articles:
-                articles[title] = {
-                    "first_url": url,
-                    "first_lang": lang,
-                    "best_url": url,
-                    "best_lang": lang,
-                }
+                articles[title] = {"best": r, "best_lang": lang}
             else:
-                entry = articles[title]
-                # Update best_url if this language matches user_lang and we didn't have it yet
-                if lang == user_lang and entry["best_lang"] != user_lang:
-                    entry["best_url"] = url
-                    entry["best_lang"] = lang
+                if lang == user_lang and articles[title]["best_lang"] != user_lang:
+                    articles[title] = {"best": r, "best_lang": lang}
 
-        # Rebuild URL list: keep all non‑Wikipedia URLs, then append preferred Wikipedia URLs
-        # in the order they first appeared.
-        seen_titles = set()
-        deduplicated = []
-        for url in urls:
-            match = re.match(r"^https?://([a-z]+)\.wikipedia\.org/wiki/(.+)", url)
-            if not match:
-                deduplicated.append(url)  # non‑Wikipedia
-                continue
-            raw_title = match.group(2)
-            title = unquote(raw_title).split("#")[0].split("?")[0].rstrip("/")
-            if not title or title in seen_titles:
-                continue
-            seen_titles.add(title)
-            # Choose the best version for this article
-            chosen = articles[title]["best_url"]
-            deduplicated.append(chosen)
+        deduped = non_wikipedia.copy()
+        for title, info in articles.items():
+            deduped.append(info["best"])
 
-        if self.valves.DEBUG:
-            removed = len(urls) - len(deduplicated)
-            if removed:
-                logger.info(
-                    f"Wikipedia deduplication: removed {removed} duplicate language variants"
-                )
-
-        return deduplicated
+        removed = len(search_results) - len(deduped)
+        return deduped, removed
 
     async def _validate_url_pipeline(
         self,
@@ -3434,6 +3529,22 @@ Now evaluate these URLs:
         if homonym_task:
             self._detected_homonyms = await homonym_task
 
+        # Deduplicate Wikipedia search results BEFORE semantic filter to keep count accurate
+        if any("wikipedia.org" in r.get("url", "") for r in search_results):
+            search_results, removed = await self._deduplicate_wikipedia_search_results(
+                search_results, __user__=__user__, __event_emitter__=__event_emitter__
+            )
+            if removed > 0 and __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🌐 Deduplicated Wikipedia URLs: removed {removed} duplicate language variant{'s' if removed != 1 else ''}.",
+                            "done": False,
+                        },
+                    }
+                )
+
         # Apply semantic filter if enabled
         if self.valves.USE_SEMANTIC_FILTER and search_results:
             filtered_urls = await self._semantic_filter_urls(
@@ -3450,25 +3561,6 @@ Now evaluate these URLs:
             if url not in gathered_urls:
                 gathered_urls.append(url)
 
-        # Deduplicate Wikipedia URLs
-        before_dedup = len(gathered_urls)
-        gathered_urls = await self._deduplicate_wikipedia_urls(gathered_urls, __user__)
-        after_dedup = len(gathered_urls)
-        if (
-            before_dedup != after_dedup
-            and __event_emitter__
-            and self.valves.MORE_STATUS
-        ):
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"🌐 Deduplicated Wikipedia URLs: removed {before_dedup - after_dedup} duplicate language variant{'s' if before_dedup - after_dedup != 1 else ''}.",
-                        "done": False,
-                    },
-                }
-            )
-
         # LLM URL filter (with minimum URLs guarantee)
         if self.valves.USE_LLM_URL_FILTER and gathered_urls:
             max_urls_limit = (
@@ -3481,7 +3573,6 @@ Now evaluate these URLs:
                 __event_emitter__=__event_emitter__,
             )
 
-        # (No further static validation here – already done at the beginning)
         return gathered_urls, user_provided_urls
 
     async def _run_normal_crawl(
@@ -3808,7 +3899,7 @@ Now evaluate these URLs:
                     },
                 }
             )
-            if self.valves.MORE_STATUS:  # always show token total
+            if self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
                         "type": "status",
@@ -4490,8 +4581,7 @@ Now evaluate these URLs:
             if not urls_to_crawl:
                 continue
 
-            # Calculate remaining URLs in the queue after this batch
-            remaining = len(queue)  # queue already had batch items popped
+            remaining = len(queue)
 
             result = await self._crawl_urls_with_cache(
                 urls=urls_to_crawl,
@@ -4835,7 +4925,6 @@ Now evaluate these URLs:
                 )
 
             results["total_pages"] += 1
-
             remaining = max_pages - results["total_pages"]
 
             crawl_result = await self._crawl_urls_with_cache(
