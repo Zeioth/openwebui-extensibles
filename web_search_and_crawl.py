@@ -3058,6 +3058,7 @@ Now evaluate these URLs:
                 except json.JSONDecodeError:
                     pass
 
+        added = 0  # initialize to avoid UnboundLocalError
         if decisions and isinstance(decisions, list):
             keep_indices = {
                 item["index"] - 1
@@ -3065,13 +3066,14 @@ Now evaluate these URLs:
                 if isinstance(item, dict) and item.get("decision") == "KEEP"
             }
             filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
+
             # Ensure we have at least min_urls if possible
             if min_urls > 0 and len(filtered_urls) < min_urls:
+                original_kept = len(filtered_urls)
                 rejected_indices = [
                     i for i in range(len(urls)) if i not in keep_indices
                 ]
                 needed = min_urls - len(filtered_urls)
-                added = 0
                 for i in rejected_indices[:needed]:
                     filtered_urls.append(urls[i])
                     added += 1
@@ -3080,7 +3082,10 @@ Now evaluate these URLs:
                         {
                             "type": "status",
                             "data": {
-                                "description": f"🧠 LLM filter: kept {len(filtered_urls)} URLs (added {added} to meet minimum).",
+                                "description": (
+                                    f"🧠 LLM filter: kept {original_kept} relevant URLs, rejected {len(urls) - original_kept}. "
+                                    f"Filled {added} from rejected list to meet minimum ({len(filtered_urls)} total)."
+                                ),
                                 "done": False,
                             },
                         }
@@ -3114,16 +3119,18 @@ Now evaluate these URLs:
         except Exception:
             pass
 
-        rejected = len(urls) - len(filtered_urls)
-        if __event_emitter__ and self.valves.MORE_STATUS:
-            desc = (
-                f"🧠 LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
-                if rejected > 0
-                else f"🧠 LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
-            )
-            await __event_emitter__(
-                {"type": "status", "data": {"description": desc, "done": False}}
-            )
+        # Only show the old summary if no filling was done (to avoid contradiction)
+        if added == 0:
+            rejected = len(urls) - len(filtered_urls)
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                desc = (
+                    f"🧠 LLM filter: keeping {len(filtered_urls)} relevant URLs, rejecting {rejected}."
+                    if rejected > 0
+                    else f"🧠 LLM filter: kept all {len(filtered_urls)} URLs (no rejections)."
+                )
+                await __event_emitter__(
+                    {"type": "status", "data": {"description": desc, "done": False}}
+                )
 
         return filtered_urls
 
