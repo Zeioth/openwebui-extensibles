@@ -3537,17 +3537,26 @@ Now evaluate these URLs:
                 {
                     "type": "status",
                     "data": {
+                        "description": f"────────────── FINISHED ──────────────",
+                        "done": True,
+                    },
+                }
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
                         "description": f"Crawled {self.pages_crawled} web pages.",
                         "done": True,
                     },
                 }
             )
-            if self.valves.MORE_STATUS and total_tokens > 0:
+            if self.valves.MORE_STATUS:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f"All batches finished: {total_tokens} tokens extracted in total",
+                            "description": f"Extracted {total_tokens} tokens",
                             "done": True,
                         },
                     }
