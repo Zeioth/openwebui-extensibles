@@ -3302,7 +3302,7 @@ Now evaluate these URLs:
                                     {
                                         "type": "status",
                                         "data": {
-                                            "description": f"batch {batch_index+1}: Allocated a budget up to {budget} tokens.",
+                                            "description": f"Batch {batch_index+1}: Allocated a budget up to {budget} tokens.",
                                             "done": False,
                                         },
                                     }
