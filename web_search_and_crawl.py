@@ -2065,7 +2065,19 @@ class Tools:
         original_count = len(urls)
 
         # Stage 0: Filter excluded domains
+        excluded_domain_urls = [url for url in urls if self._is_domain_excluded(url)]
         urls = [url for url in urls if not self._is_domain_excluded(url)]
+        if excluded_domain_urls and __event_emitter__ and self.valves.MORE_STATUS:
+            for url in excluded_domain_urls:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🛑 Excluded domain: {url}",
+                            "done": False,
+                        },
+                    }
+                )
         if self.valves.DEBUG and original_count != len(urls):
             logger.info(
                 f"Validation stage 0: filtered out "
@@ -2074,7 +2086,19 @@ class Tools:
             original_count = len(urls)
 
         # Stage 1: Filter invalid URLs
+        invalid_urls = [url for url in urls if not self._is_valid_crawl_url(url)]
         urls = [url for url in urls if self._is_valid_crawl_url(url)]
+        if invalid_urls and __event_emitter__ and self.valves.MORE_STATUS:
+            for url in invalid_urls:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🛑 Invalid URL: {url}",
+                            "done": False,
+                        },
+                    }
+                )
         if self.valves.DEBUG and original_count != len(urls):
             logger.info(
                 f"Validation stage 1: filtered out "
@@ -2096,7 +2120,19 @@ class Tools:
                 )
             tasks = [self._is_accessible_html(url) for url in urls]
             results = await asyncio.gather(*tasks)
+            inaccessible_urls = [url for url, ok in zip(urls, results) if not ok]
             urls = [url for url, ok in zip(urls, results) if ok]
+            if inaccessible_urls and __event_emitter__ and self.valves.MORE_STATUS:
+                for url in inaccessible_urls:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🛑 Not accessible: {url}",
+                                "done": False,
+                            },
+                        }
+                    )
             if self.valves.DEBUG:
                 logger.info(f"Validation stage 2: {len(urls)} accessible HTML URLs")
 
@@ -2161,6 +2197,20 @@ class Tools:
                     for url in urls
                 ]
                 general_results = await asyncio.gather(*tasks)
+                no_keyword_urls = [
+                    url for url, ok in zip(urls, general_results) if not ok
+                ]
+                if no_keyword_urls and __event_emitter__ and self.valves.MORE_STATUS:
+                    for url in no_keyword_urls:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": f"🛑 No keywords found: {url}",
+                                    "done": False,
+                                },
+                            }
+                        )
 
                 # Anchor keyword check with fallback if too strict
                 if anchor_keywords:
@@ -3184,6 +3234,28 @@ Now evaluate these URLs:
                 gathered_urls, query, __event_emitter__
             )
 
+        # Validate URLs (keywords & accessibility) BEFORE limiting
+        gathered_urls = await self._validate_url_pipeline(
+            gathered_urls,
+            query,
+            check_accessibility=True,
+            check_keywords=True,
+            __event_emitter__=__event_emitter__,
+        )
+        if not gathered_urls:
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"Nothing found for query '{query}' after validation.",
+                            "done": True,
+                        },
+                    }
+                )
+            await self._emit_final_status([], start_time, __event_emitter__)
+            return f"No URLs passed validation for the query: {query}."
+
         return gathered_urls, user_provided_urls
 
     async def _run_normal_crawl(
@@ -3207,12 +3279,10 @@ Now evaluate these URLs:
             or 200
         )
 
-        gathered_urls = await self._validate_url_pipeline(
-            gathered_urls,
-            query,
-            check_keywords=True,
-            __event_emitter__=__event_emitter__,
-        )
+        # URLs are already validated (keywords + accessibility) in search_and_crawl
+        # Only re-check accessibility in case some became unreachable? Skipping to avoid redundancy.
+        # If you still want to revalidate, set check_accessibility=True, check_keywords=False.
+        # For now, we assume they remain valid.
 
         # If accessibility removed all URLs, inform user to increase semantic filter
         if not gathered_urls and __event_emitter__ and self.valves.MORE_STATUS:
