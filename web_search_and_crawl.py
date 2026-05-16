@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.9
+version: 3.1.0
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -2763,11 +2763,12 @@ Now output your JSON array:
         self,
         urls: List[str],
         query: str,
+        min_urls: int = 0,
         __event_emitter__: Callable[[dict], Any] = None,
     ) -> List[str]:
         """Filter URLs using LLM for semantic relevance.
         Uses FILTER_LLM_PROVIDER valve (falls back to LLM_PROVIDER).
-        """
+        min_urls ensures at least that many URLs are kept (if possible)."""
         import json
 
         if not self.valves.USE_LLM_URL_FILTER or not urls:
@@ -2959,6 +2960,24 @@ Now evaluate these URLs:
                 if isinstance(item, dict) and item.get("decision") == "KEEP"
             }
             filtered_urls = [urls[i] for i in range(len(urls)) if i in keep_indices]
+            # Ensure we have at least min_urls if possible
+            if min_urls > 0 and len(filtered_urls) < min_urls:
+                rejected_indices = [
+                    i for i in range(len(urls)) if i not in keep_indices
+                ]
+                needed = min_urls - len(filtered_urls)
+                for i in rejected_indices[:needed]:
+                    filtered_urls.append(urls[i])
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"🧠 LLM filter: kept {len(filtered_urls)} URLs (added {needed} to meet minimum).",
+                                "done": False,
+                            },
+                        }
+                    )
             if self.valves.DEBUG:
                 logger.info(
                     f"LLM URL filter: kept {len(filtered_urls)}/{len(urls)} URLs"
@@ -3205,15 +3224,6 @@ Now evaluate these URLs:
                 {
                     "type": "status",
                     "data": {
-                        "description": "────────────── CRAWLING STARTS ──────────────",
-                        "done": False,
-                    },
-                }
-            )
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
                         "description": f"🔍 Processing {total_processing} most relevant results ({cache_hit_urls} from cache, {len(uncached_urls)} to crawl)...",
                         "done": False,
                     },
@@ -3312,21 +3322,12 @@ Now evaluate these URLs:
             for batch_idx, crawled_batch in enumerate(results):
                 if isinstance(crawled_batch, dict):
                     links = crawled_batch.get("links", [])
-                    if url_depths:
-                        # We need to map links to parent depth; however, we lost which parent URL each link belongs to.
-                        # So we'll assign all links the depth of the first URL in the batch? That's not perfect.
-                        # Instead, we require that the caller passes individual URLs, not batches, to preserve depth.
-                        # For research modes, they will pass one URL at a time to this method (by calling with a single URL).
-                        # So we'll handle that in research modes: they'll call this with one URL and its depth.
-                        # But here we are in batch mode; we can't assign depth per link.
-                        # So we'll only use url_depths if len(urls) == 1.
-                        if len(urls) == 1 and url_depths:
-                            parent_depth = url_depths[0]
-                            links_with_depth.extend(
-                                [(link, parent_depth + 1) for link in links]
-                            )
-                        else:
-                            all_links.extend(links)
+                    if url_depths and len(urls) == 1:
+                        # single URL, we can assign depth
+                        parent_depth = url_depths[0]
+                        links_with_depth.extend(
+                            [(link, parent_depth + 1) for link in links]
+                        )
                     else:
                         all_links.extend(links)
 
@@ -3429,10 +3430,16 @@ Now evaluate these URLs:
                 }
             )
 
-        # LLM URL filter
+        # LLM URL filter (with minimum URLs guarantee)
         if self.valves.USE_LLM_URL_FILTER and gathered_urls:
+            max_urls_limit = (
+                self.user_valves.CRAWL4AI_MAX_URLS or self.valves.CRAWL4AI_MAX_URLS
+            )
             gathered_urls = await self._filter_urls_with_llm(
-                gathered_urls, query, __event_emitter__
+                gathered_urls,
+                query,
+                min_urls=max_urls_limit,
+                __event_emitter__=__event_emitter__,
             )
 
         # Validation (static keyword check if enabled, otherwise accessibility only)
@@ -3487,6 +3494,16 @@ Now evaluate these URLs:
         __event_emitter__: Callable[[dict], Any],
     ) -> Tuple[List[dict], List[str], List[str], int]:
         """Executes normal crawl with cache and parallel batches. Returns (results, images, videos, total_tokens)."""
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "────────────── CRAWLING STARTS ──────────────",
+                        "done": False,
+                    },
+                }
+            )
         result = await self._crawl_urls_with_cache(
             urls=gathered_urls,
             query=query,
@@ -3518,7 +3535,7 @@ Now evaluate these URLs:
         Returns total tokens used."""
         total_tokens = 0
 
-        # 1. Handle cache and media (non‑CPU intensive, done sequentially)
+        pages_attempted = 0
         filter_tasks = []  # collect background cache filter tasks
         for batch_idx, crawled_batch in enumerate(results):
             if isinstance(crawled_batch, Exception):
@@ -3526,6 +3543,8 @@ Now evaluate these URLs:
                 continue
             if not isinstance(crawled_batch, dict):
                 continue
+
+            pages_attempted += len(crawled_batch.get("content", []))
 
             # Cache markdown
             if self.valves.USE_PAGE_CACHE:
@@ -3566,6 +3585,9 @@ Now evaluate these URLs:
                 seen_videos.add(base_video_url)
                 video_list.append(vid_url)
 
+        # Update pages_crawled with the number of pages we attempted (even if content empty)
+        self.pages_crawled += pages_attempted
+
         # 2. Process every page across all batches in parallel, attaching source URL
         page_tasks = []
         for batch_idx, crawled_batch in enumerate(results):
@@ -3583,7 +3605,6 @@ Now evaluate these URLs:
                         page_data, batch_idx, batches, source_url, return_batch_idx=True
                     )
                 )
-                self.pages_crawled += 1  # real page counter
 
         per_batch_tokens = {}
         if page_tasks:
@@ -3701,7 +3722,6 @@ Now evaluate these URLs:
         if "videos" in research_result:
             video_list.extend(research_result["videos"])
 
-        # Research mode tokens_used is tracked inside each strategy
         total_tokens = research_result.get("tokens_used", 0)
         return crawl_results, image_list, video_list, total_tokens
 
@@ -4377,7 +4397,7 @@ Now evaluate these URLs:
 
     # endregion
 
-    # region ── Research Crawl Strategies (Refactored) ─────────────────────────
+    # region ── Research Crawl Strategies ─────────────────────────────────────
 
     async def _pseudo_adaptive_crawl(
         self,
@@ -4421,11 +4441,26 @@ Now evaluate these URLs:
             and (max_tokens == 0 or total_tokens < max_tokens)
         ):
             batch = []
+            current_depth = None
             for _ in range(min(batch_size, len(queue))):
                 if queue:
-                    batch.append(queue.popleft())
+                    item = queue.popleft()
+                    batch.append(item)
+                    if current_depth is None:
+                        current_depth = item[1]
 
             batch.sort(key=lambda x: x[2], reverse=True)
+
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"────────────── CRAWLING STARTS (Depth {current_depth+1}) ──────────────",
+                            "done": False,
+                        },
+                    }
+                )
 
             urls_to_crawl = []
             url_depths = []
@@ -4435,7 +4470,6 @@ Now evaluate these URLs:
                 if url in crawled_pages:
                     continue
 
-                # Validate URL before crawling
                 validated = await self._validate_url_pipeline(
                     [url],
                     query,
@@ -4452,7 +4486,6 @@ Now evaluate these URLs:
             if not urls_to_crawl:
                 continue
 
-            # Use unified crawler with depth info for link extraction
             result = await self._crawl_urls_with_cache(
                 urls=urls_to_crawl,
                 query=query,
@@ -4466,7 +4499,6 @@ Now evaluate these URLs:
             all_images.extend(result["images"])
             all_videos.extend(result["videos"])
 
-            # Process discovered links with depth
             for link, new_depth in result.get("links_with_depth", []):
                 if new_depth > max_depth:
                     continue
@@ -4475,9 +4507,7 @@ Now evaluate these URLs:
                 if not self._is_valid_crawl_url(link):
                     continue
                 parsed_link = urlparse(link)
-                if not include_external and parsed_link.netloc:
-                    # we need to check if it's external relative to the original seed domain? We'll skip that check for now.
-                    pass
+                # domain restriction: we don't have the original domain easily; skip for now
                 link_score = sum(1 for kw in keywords if kw in link.lower())
                 if link_score > 0:
                     queue.append((link, new_depth, link_score))
@@ -4519,18 +4549,19 @@ Now evaluate these URLs:
         total_tokens = 0
 
         urls_to_process = list(start_urls)
+        round_num = 0
 
         while (
             urls_to_process
             and len(crawled_pages) < max_pages
             and (max_tokens == 0 or total_tokens < max_tokens)
         ):
+            round_num += 1
             current_url = urls_to_process.pop(0)
 
             if current_url in crawled_pages:
                 continue
 
-            # Validate URL before crawling
             validated = await self._validate_url_pipeline(
                 [current_url],
                 query,
@@ -4540,15 +4571,25 @@ Now evaluate these URLs:
             if not validated:
                 continue
 
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"────────────── CRAWLING STARTS (Round {round_num}) ──────────────",
+                            "done": False,
+                        },
+                    }
+                )
+
             crawled_pages.add(current_url)
 
-            # Use unified crawler for this single URL (depth not needed for links)
             result = await self._crawl_urls_with_cache(
                 urls=[current_url],
                 query=query,
                 max_tokens=max_tokens,
                 extract_links=True,
-                url_depths=[0],  # dummy depth
+                url_depths=[0],
                 __event_emitter__=__event_emitter__,
             )
             total_tokens += result["tokens_used"]
@@ -4643,6 +4684,18 @@ Now evaluate these URLs:
             and (max_tokens == 0 or total_tokens < max_tokens)
         ):
             level_batch = [queue.popleft() for _ in range(min(batch_size, len(queue)))]
+            if level_batch:
+                current_depth = level_batch[0][1]
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"────────────── CRAWLING STARTS (Depth {current_depth+1}) ──────────────",
+                                "done": False,
+                            },
+                        }
+                    )
 
             urls_to_crawl = []
             url_depths = []
@@ -4740,8 +4793,10 @@ Now evaluate these URLs:
         }
 
         total_tokens = 0
+        round_num = 0
 
         for source_url in start_urls[:5]:
+            round_num += 1
             validated = await self._validate_url_pipeline(
                 [source_url],
                 query,
@@ -4754,9 +4809,19 @@ Now evaluate these URLs:
             if results["total_pages"] >= max_pages:
                 break
 
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"────────────── CRAWLING STARTS (Round {round_num}) ──────────────",
+                            "done": False,
+                        },
+                    }
+                )
+
             results["total_pages"] += 1
 
-            # Crawl source URL
             crawl_result = await self._crawl_urls_with_cache(
                 urls=[source_url],
                 query=query,
