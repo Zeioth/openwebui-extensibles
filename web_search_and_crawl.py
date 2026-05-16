@@ -319,6 +319,14 @@ class Tools:
             description="Set to true and then perform any search to trigger a one‑time re‑evaluation of all cached chunks using the LLM filter. After completion it will be set back to false automatically.",
         )
 
+        # ── Validation ─────────────────────────────────────────────────────
+        STATIC_URL_VALIDATION: bool = Field(
+            default=False,
+            title="Static URL Validation (keyword check)",
+            description="If enabled, performs a static keyword check on the page content before crawling. "
+            "This can be too strict and may discard relevant pages. The LLM filter is usually smarter.",
+        )
+
         # ── Feature Parameters ───────────────────────────────────────────────
         MAX_EXPANDED_QUERIES: int = Field(
             title="Max Expanded Queries",
@@ -2140,7 +2148,7 @@ class Tools:
             return []
 
         # Stage 3: Check keywords in content
-        if check_keywords and query:
+        if check_keywords and query and self.valves.STATIC_URL_VALIDATION:
             stopwords = {
                 "de",
                 "la",
@@ -3233,6 +3241,52 @@ Now evaluate these URLs:
             gathered_urls = await self._filter_urls_with_llm(
                 gathered_urls, query, __event_emitter__
             )
+
+        # ── Validation and ordering ─────────────────────────────────────────
+        # If static validation is enabled, run it BEFORE the LLM filter
+        if self.valves.STATIC_URL_VALIDATION:
+            gathered_urls = await self._validate_url_pipeline(
+                gathered_urls,
+                query,
+                check_accessibility=True,
+                check_keywords=True,
+                __event_emitter__=__event_emitter__,
+            )
+            if not gathered_urls:
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"No valid URLs found for query '{query}' after static validation.",
+                                "done": True,
+                            },
+                        }
+                    )
+                await self._emit_final_status([], start_time, __event_emitter__)
+                return f"No URLs passed static validation for the query: {query}."
+        # If static validation is OFF, we still need an accessibility check (no keywords)
+        else:
+            gathered_urls = await self._validate_url_pipeline(
+                gathered_urls,
+                query,
+                check_accessibility=True,
+                check_keywords=False,
+                __event_emitter__=__event_emitter__,
+            )
+            if not gathered_urls:
+                if __event_emitter__:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"No accessible URLs found for query '{query}'.",
+                                "done": True,
+                            },
+                        }
+                    )
+                await self._emit_final_status([], start_time, __event_emitter__)
+                return f"No accessible URLs for the query: {query}."
 
         # Validate URLs (keywords & accessibility) BEFORE limiting
         gathered_urls = await self._validate_url_pipeline(
