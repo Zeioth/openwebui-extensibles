@@ -2,9 +2,9 @@
 title: Web Search and Crawl
 description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, and Crawl4AI. Extracts content from URLs using a self-hosted Crawl4AI instance, optionally researching using Crawl4AI Deep Research.
 author: lexiismadd, zeioth
-author_url: https://github.com/lexiismad, https://github.com/zeioth
+author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.6
+version: 3.0.7
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -503,6 +503,7 @@ class Tools:
         # Private attributes must be initialized before _configure()
         self.crawl_counter = 0
         self.content_counter = 0
+        self.pages_crawled = 0  # real page counter
         self.total_urls = 0
         self._detected_homonyms: Optional[List[str]] = None
         self.stats_lock = asyncio.Lock()
@@ -511,6 +512,7 @@ class Tools:
 
         self._chroma_client = None
         self._cache_collection = None
+        self._excluded_collection = None
         self._validation_session: Optional[aiohttp.ClientSession] = None
 
         self._configure()
@@ -629,6 +631,70 @@ class Tools:
                 "page_cache", embedding_function=None
             )
         return self._cache_collection
+
+    def _get_excluded_collection(self):
+        if self._excluded_collection is None:
+            client = self._get_chroma_client()
+            self._excluded_collection = client.get_or_create_collection(
+                "excluded_urls", embedding_function=None
+            )
+        return self._excluded_collection
+
+    async def _is_url_excluded(self, url: str) -> bool:
+        """Return True if the URL is in the exclusion list and its timestamp has not expired."""
+        try:
+            col = self._get_excluded_collection()
+            results = await anyio.to_thread.run_sync(
+                lambda: col.get(where={"url": url})
+            )
+            if not results or not results["metadatas"]:
+                return False
+            ttl_seconds = self.valves.CACHE_TTL_HOURS * 3600
+            now = time.time()
+            for meta in results["metadatas"]:
+                if now - meta.get("timestamp", 0) <= ttl_seconds:
+                    return True
+            # Expired -> clean up
+            await anyio.to_thread.run_sync(lambda: col.delete(ids=results["ids"]))
+            return False
+        except Exception as e:
+            logger.error(f"Error checking exclusion for {url}: {e}")
+            return False
+
+    async def _mark_url_excluded(self, url: str) -> None:
+        """Mark the URL as excluded with the current timestamp."""
+        try:
+            col = self._get_excluded_collection()
+            # Remove any previous entries
+            existing = await anyio.to_thread.run_sync(
+                lambda: col.get(where={"url": url})
+            )
+            if existing and existing["ids"]:
+                await anyio.to_thread.run_sync(lambda: col.delete(ids=existing["ids"]))
+            # Insert new entry
+            await anyio.to_thread.run_sync(
+                lambda: col.add(
+                    embeddings=[[0.0] * 384],  # dummy vector (MiniLM dim)
+                    metadatas=[{"url": url, "timestamp": time.time()}],
+                    ids=[f"excl_{url}"],
+                )
+            )
+            logger.debug(f"URL excluded and marked: {url}")
+        except Exception as e:
+            logger.error(f"Error marking URL as excluded {url}: {e}")
+
+    async def _clear_url_exclusion(self, url: str) -> None:
+        """Remove the URL from the exclusion list (it now has relevant content)."""
+        try:
+            col = self._get_excluded_collection()
+            existing = await anyio.to_thread.run_sync(
+                lambda: col.get(where={"url": url})
+            )
+            if existing and existing["ids"]:
+                await anyio.to_thread.run_sync(lambda: col.delete(ids=existing["ids"]))
+                logger.debug(f"Exclusion cleared for {url}")
+        except Exception as e:
+            logger.error(f"Error clearing exclusion for {url}: {e}")
 
     async def _get_validation_session(self) -> aiohttp.ClientSession:
         if self._validation_session is None or self._validation_session.closed:
@@ -1330,8 +1396,11 @@ class Tools:
 
         return chunks
 
-    async def _cache_page(self, url: str, markdown: Any, __event_emitter__: Callable[[dict], Any] = None):
-        """Store page chunks with embeddings and timestamp in the persistent collection."""
+    async def _cache_page(
+        self, url: str, markdown: Any, __event_emitter__: Callable[[dict], Any] = None
+    ):
+        """Store page chunks with embeddings and timestamp in the persistent collection.
+        Returns the filter task if CACHE_FILTER_ENABLED, else None."""
         # Only cache if markdown is a non-empty string; otherwise skip silently
         if not isinstance(markdown, str):
             if isinstance(markdown, dict):
@@ -1344,19 +1413,21 @@ class Tools:
                     logger.warning(
                         f"Skipping cache for {url}: markdown is dict without known text keys"
                     )
-                    return
+                    return None
             else:
                 logger.warning(f"Skipping cache for {url}: markdown is not a string")
-                return
+                return None
 
         if not markdown.strip():
-            return
+            return None
 
         if not self._get_embedder() or not self._get_cache_collection():
-            return
+            return None
 
         # Compute content hash to avoid re‑caching unchanged pages
         content_hash = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+
+        filter_task = None  # will hold the background task if filter is enabled
 
         try:
             # Check if we already have an up‑to‑date cache entry
@@ -1367,7 +1438,7 @@ class Tools:
                 # If the first chunk's content_hash matches, skip all work
                 if existing["metadatas"][0].get("content_hash") == content_hash:
                     logger.debug(f"Cache unchanged for {url}, skipping re‑cache")
-                    return
+                    return None
                 # Otherwise, delete the outdated chunks
                 await anyio.to_thread.run_sync(
                     lambda: self._get_cache_collection().delete(ids=existing["ids"])
@@ -1375,12 +1446,12 @@ class Tools:
 
             chunks = self._chunk_text(markdown)
             if not chunks:
-                return
+                return None
 
             # Start filter task in background if enabled; initially mark all as relevant
             if self.valves.CACHE_FILTER_ENABLED:
                 logger.info(f"Started background cache filter for {url}")
-                asyncio.create_task(
+                filter_task = asyncio.create_task(
                     self._filter_and_update_cache(url, chunks.copy(), __event_emitter__)
                 )
                 if __event_emitter__ and self.valves.MORE_STATUS:
@@ -1428,12 +1499,32 @@ class Tools:
             if url in self._cache_locks and not self._cache_locks[url].locked():
                 del self._cache_locks[url]
 
-    async def _filter_and_update_cache(self, url: str, chunks: List[str], __event_emitter__: Callable[[dict], Any] = None):
-        """Background task: classify chunks and update their relevance in ChromaDB."""
+        return filter_task  # may be None if filter disabled
+
+    async def _filter_and_update_cache(
+        self,
+        url: str,
+        chunks: List[str],
+        __event_emitter__: Callable[[dict], Any] = None,
+    ):
+        """Background task: classify chunks and update their relevance in ChromaDB.
+        Also marks the URL as excluded if no chunks are relevant."""
         try:
             relevance = await self._filter_chunks_with_llm(chunks)
             if relevance is None or len(relevance) != len(chunks):
-                logger.warning(f"Cache filter for {url} returned invalid result; skipping update")
+                logger.warning(
+                    f"Cache filter for {url} returned invalid result; skipping update"
+                )
+                if __event_emitter__ and self.valves.MORE_STATUS:
+                    await __event_emitter__(
+                        {
+                            "type": "status",
+                            "data": {
+                                "description": f"⚠️ Cache filter skipped for {url} (LLM error)",
+                                "done": False,
+                            },
+                        }
+                    )
                 return
 
             # Update metadata in ChromaDB
@@ -1462,17 +1553,33 @@ class Tools:
                 await anyio.to_thread.run_sync(
                     lambda: col.update(ids=ids, metadatas=metadatas)
                 )
-            logger.info(f"Finished background cache filter for {url}")
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"🧠 Cache filter completed for {url}",
-                            "done": False,
-                        },
-                    }
+
+                # Determine if the URL should be excluded or unmarked
+                num_relevant = sum(
+                    1 for meta in metadatas if meta.get("relevant", True)
                 )
+                if num_relevant == 0:
+                    await self._mark_url_excluded(url)
+                    msg = f"🧠❌ Rejected by LLM cache filter: {url}"
+                    logger.info(msg)
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": msg, "done": False},
+                            }
+                        )
+                else:
+                    await self._clear_url_exclusion(url)  # in case it was excluded
+                    msg = f"🧠✅ Accepted by LLM cache filter: {url}"
+                    logger.info(msg)
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": msg, "done": False},
+                            }
+                        )
         except Exception as e:
             logger.error(f"Error in background cache filter for {url}: {e}")
             if __event_emitter__ and self.valves.MORE_STATUS:
@@ -1489,7 +1596,7 @@ class Tools:
     async def _filter_chunks_with_llm(self, chunks: List[str]) -> Optional[List[bool]]:
         """
         Send all chunks to a small LLM to classify each as relevant (true) or noise (false).
-        Returns a list of booleans with the same length as chunks, or None on failure.
+        Returns a list of booleans with the same length as chunks, or all True on failure.
         """
         if not chunks:
             return []
@@ -1511,16 +1618,53 @@ class Tools:
                 system="Return only a JSON array of booleans. No other text.",
                 provider=provider,
                 temperature=0.0,
-                max_tokens=2000,
-                timeout=60,
+                max_tokens=0,  # increased to avoid truncation/errors.
+                timeout=120,
             )
-            import json
-            arr = json.loads(content)
-            if isinstance(arr, list):
-                return [bool(v) for v in arr]
+            import json, re
+
+            content = content.strip()
+            if not content:
+                logger.warning("Chunk filter LLM returned empty content")
+                return [True] * len(chunks)
+
+            # Try to extract the first JSON array from the response
+            array_match = re.search(r"\[.*\]", content, re.DOTALL)
+            if array_match:
+                extracted = array_match.group(0)
+                logger.debug(f"Chunk filter extracted JSON array: {extracted[:200]}...")
+                content = extracted
+
+            try:
+                arr = json.loads(content)
+                if isinstance(arr, list):
+                    if len(arr) != len(chunks):
+                        logger.warning(
+                            f"Chunk filter LLM: array length mismatch (got {len(arr)}, expected {len(chunks)}). "
+                            f"Using all True as fallback."
+                        )
+                        return [True] * len(chunks)
+                    return [bool(v) for v in arr]
+                else:
+                    logger.warning(
+                        f"Chunk filter LLM: response is not a list. Using all True."
+                    )
+                    return [True] * len(chunks)
+            except json.JSONDecodeError:
+                # Maybe the JSON is truncated; try to fix it
+                if not content.endswith("]"):
+                    content += "]"
+                try:
+                    arr = json.loads(content)
+                    if isinstance(arr, list):
+                        result = [bool(v) for v in arr]
+                        result.extend([True] * (len(chunks) - len(result)))
+                        return result
+                except:
+                    pass
         except Exception as e:
-            logger.warning(f"Chunk filter LLM error: {e}")
-        return None
+            logger.warning(f"Chunk filter LLM error: {e}. Using all True as fallback.")
+        return [True] * len(chunks)
 
     def _get_cached_chunks(
         self, url: str, query: str, max_chunks: int = 3
@@ -1551,12 +1695,17 @@ class Tools:
             # Filter out chunks marked as not relevant (if metadata available)
             if results["metadatas"]:
                 relevant_indices = [
-                    i for i, meta in enumerate(results["metadatas"])
-                    if meta.get("relevant", True)  # default to relevant if metadata missing
+                    i
+                    for i, meta in enumerate(results["metadatas"])
+                    if meta.get(
+                        "relevant", True
+                    )  # default to relevant if metadata missing
                 ]
                 if not relevant_indices:
                     return []
-                results["documents"] = [results["documents"][i] for i in relevant_indices]
+                results["documents"] = [
+                    results["documents"][i] for i in relevant_indices
+                ]
 
             if not results["documents"]:
                 return []
@@ -1588,6 +1737,7 @@ class Tools:
         """
         Consult cache, return (cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks).
         Emits status message and logs summary.
+        Now also skips URLs that are excluded by the LLM filter.
         """
         cached_results = []
         uncached_urls = []
@@ -1596,12 +1746,31 @@ class Tools:
 
         if self.valves.USE_PAGE_CACHE:
             for url in gathered_urls:
+                # Skip if the URL is excluded and still within TTL
+                if await self._is_url_excluded(url):
+                    if self.valves.DEBUG:
+                        logger.debug(f"URL excluded by LLM filter, ignored: {url}")
+                    continue  # neither cached nor crawled
+
                 chunks = self._get_cached_chunks(url, query, max_chunks=3)
                 if chunks:
                     cache_hit_urls += 1
+                    msg = f"📦 Serving from cache: {url}"
+                    logger.info(msg)
+                    if __event_emitter__ and self.valves.MORE_STATUS:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": msg, "done": False},
+                            }
+                        )
                     for chunk in chunks:
                         cached_results.append(
-                            {"topic": f"From cache: {url}", "summary": chunk, "source": url}
+                            {
+                                "topic": f"From cache: {url}",
+                                "summary": chunk,
+                                "source": url,
+                            }
                         )
                         cache_hit_chunks += 1
                 else:
@@ -1682,7 +1851,9 @@ class Tools:
                 await self._filter_and_update_cache(url, chunks, __event_emitter__)
                 processed += 1
                 if processed % 10 == 0:
-                    logger.info(f"Cache reindex: processed {processed}/{total_urls} URLs")
+                    logger.info(
+                        f"Cache reindex: processed {processed}/{total_urls} URLs"
+                    )
             logger.info(f"Cache reindex complete: {processed} URLs re‑evaluated")
 
             if __event_emitter__ and self.valves.MORE_STATUS:
@@ -3042,8 +3213,34 @@ Now evaluate these URLs:
                     )
                     continue
 
-                async def process_batch(batch=batch, budget=budget):
+                async def process_batch(
+                    batch=batch, budget=budget, batch_index=batch_index
+                ):
                     async with sem:
+                        # Combined status message: batch number, URL count, URLs
+                        urls_str = ", ".join(batch[:3])
+                        if len(batch) > 3:
+                            urls_str += f" and {len(batch)-3} more"
+                        if __event_emitter__ and self.valves.MORE_STATUS:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Processing Batch {batch_index+1} of {len(batch)} URL(s): {urls_str}",
+                                        "done": False,
+                                    },
+                                }
+                            )
+                            if budget is not None:
+                                await __event_emitter__(
+                                    {
+                                        "type": "status",
+                                        "data": {
+                                            "description": f"Allocated a budget up to {budget} tokens for batch {batch_index+1}",
+                                            "done": False,
+                                        },
+                                    }
+                                )
                         await asyncio.sleep(0.2)
                         return await self._crawl_url(
                             urls=batch,
@@ -3084,10 +3281,12 @@ Now evaluate these URLs:
         thumbnail_size: int,
         __event_emitter__: Callable[[dict], Any],
     ) -> int:
-        """Processes results from Crawl4AI batches: cache, images, videos, and content (per page, in parallel). Returns total tokens used."""
+        """Processes results from Crawl4AI batches: cache, images, videos, and content (per page, in parallel).
+        Returns total tokens used."""
         total_tokens = 0
 
         # 1. Handle cache and media (non‑CPU intensive, done sequentially)
+        filter_tasks = []  # collect background cache filter tasks
         for batch_idx, crawled_batch in enumerate(results):
             if isinstance(crawled_batch, Exception):
                 logger.error(f"Batch crawl error: {crawled_batch}")
@@ -3101,7 +3300,9 @@ Now evaluate these URLs:
                     url = result_entry.get("url")
                     markdown = result_entry.get("markdown")
                     if url and markdown:
-                        await self._cache_page(url, markdown, __event_emitter__)
+                        ft = await self._cache_page(url, markdown, __event_emitter__)
+                        if ft is not None:
+                            filter_tasks.append(ft)
 
             # Images
             for img_url in crawled_batch.get("images", []):
@@ -3145,31 +3346,41 @@ Now evaluate these URLs:
                 if idx < len(raw_results):
                     source_url = raw_results[idx].get("url", "")
                 page_tasks.append(
-                    self._process_single_page(page_data, batch_idx, batches, source_url)
+                    self._process_single_page(
+                        page_data, batch_idx, batches, source_url, return_batch_idx=True
+                    )
                 )
+                self.pages_crawled += 1  # real page counter
 
+        per_batch_tokens = {}
         if page_tasks:
             processed = await asyncio.gather(*page_tasks)
-            for norm_content, token_count in processed:
+            for norm_content, token_count, batch_idx in processed:
                 if norm_content:
                     async with self.stats_lock:
                         crawl_results.extend(norm_content)
                         total_tokens += token_count
                         self.crawl_counter += len(norm_content)  # items in this page
-                        self.content_counter += 1  # pages processed
-                if __event_emitter__ and self.valves.MORE_STATUS:
-                    async with self.status_lock:
-                        pages = self.content_counter
-                        total = self.total_urls
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"Analyzed {pages} page{'s' if pages != 1 else ''} from {total} URLs...",
-                                    "done": False,
-                                },
-                            }
-                        )
+                        self.content_counter += 1  # pages processed (fragments)
+                    per_batch_tokens[batch_idx] = (
+                        per_batch_tokens.get(batch_idx, 0) + token_count
+                    )
+
+        # Wait for all background cache filter tasks to finish.
+        # This ensures that the ✅/❌ messages appear before the batch token summary.
+        if filter_tasks:
+            await asyncio.gather(*filter_tasks, return_exceptions=True)
+
+        # Emit tokens per batch (now after filters)
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            for batch_urls, batch_index in batches:
+                if batch_index in per_batch_tokens:
+                    tokens_batch = per_batch_tokens[batch_index]
+                    msg = f"Batch {batch_index+1}: Extracted {tokens_batch} tokens"
+                    await __event_emitter__(
+                        {"type": "status", "data": {"description": msg, "done": False}}
+                    )
+                    logger.info(msg)
 
         return total_tokens
 
@@ -3179,18 +3390,19 @@ Now evaluate these URLs:
         batch_idx: int,
         batches: List[Tuple[List[str], int]],
         source_url: str = "",
+        return_batch_idx: bool = False,
     ) -> Tuple[list, int]:
         """
         Normalise and token‑count a single page from a batch.
-        Returns (normalised_content_list, token_count).
+        Returns (normalised_content_list, token_count, [batch_idx]) if return_batch_idx is True.
         """
         content_list = page_data.get("content", [])
         if not content_list:
-            return [], 0
+            return ([], 0, batch_idx) if return_batch_idx else ([], 0)
 
         norm = self._normalize_content(content_list)
         if not norm:
-            return [], 0
+            return ([], 0, batch_idx) if return_batch_idx else ([], 0)
 
         content_str = orjson.dumps(norm).decode("utf-8")
         tokens = await self._count_tokens(content_str)
@@ -3220,6 +3432,8 @@ Now evaluate these URLs:
                 if isinstance(item, dict):
                     item["source"] = source_url
 
+        if return_batch_idx:
+            return norm, tokens, batch_idx
         return norm, tokens
 
     async def _run_research_crawl(
@@ -3317,13 +3531,13 @@ Now evaluate these URLs:
         __event_emitter__: Callable[[dict], Any],
         total_tokens: int = 0,
     ) -> None:
-        """Emits final status messages (inspected pages, elapsed time)."""
+        """Emits final status messages (crawled pages, elapsed time)."""
         if __event_emitter__:
             await __event_emitter__(
                 {
                     "type": "status",
                     "data": {
-                        "description": f"Inspected {len(crawl_results)} web pages.",
+                        "description": f"Crawled {self.pages_crawled} web pages.",
                         "done": True,
                     },
                 }
@@ -3333,7 +3547,7 @@ Now evaluate these URLs:
                     {
                         "type": "status",
                         "data": {
-                            "description": f"Total tokens used: {total_tokens}",
+                            "description": f"All batches finished: {total_tokens} tokens extracted in total",
                             "done": True,
                         },
                     }
@@ -3420,6 +3634,7 @@ Now evaluate these URLs:
         # Reset counters
         self.crawl_counter = 0
         self.content_counter = 0
+        self.pages_crawled = 0
         self.total_urls = 0
 
         # 1. Prepare search URLs
@@ -3516,12 +3731,20 @@ Now evaluate these URLs:
                         },
                     }
                 )
-            crawl_results, image_list, video_list, total_tokens = await self._run_research_crawl(
-                gathered_urls, query, effective_crawl_mode, max_urls, __event_emitter__
+            crawl_results, image_list, video_list, total_tokens = (
+                await self._run_research_crawl(
+                    gathered_urls,
+                    query,
+                    effective_crawl_mode,
+                    max_urls,
+                    __event_emitter__,
+                )
             )
         else:
-            crawl_results, image_list, video_list, total_tokens = await self._run_normal_crawl(
-                gathered_urls, query, max_images, __event_emitter__
+            crawl_results, image_list, video_list, total_tokens = (
+                await self._run_normal_crawl(
+                    gathered_urls, query, max_images, __event_emitter__
+                )
             )
 
         # Normalize final results
@@ -3531,7 +3754,9 @@ Now evaluate these URLs:
         await self._display_media(image_list, video_list, max_images, __event_emitter__)
 
         # 4. Final status
-        await self._emit_final_status(crawl_results, start_time, __event_emitter__, total_tokens)
+        await self._emit_final_status(
+            crawl_results, start_time, __event_emitter__, total_tokens
+        )
 
         # Close shared validation session
         await self._close_validation_session()
@@ -3644,23 +3869,7 @@ Now evaluate these URLs:
             exclude_external_images=self.valves.CRAWL4AI_EXCLUDE_IMAGES == "External",
         )
 
-        if __event_emitter__ and self.valves.MORE_STATUS:
-            description = (
-                f"Processing {len(urls)} URLs..."
-                if len(urls) > 1
-                else f"Processing {urls[0]}..."
-            )
-            await __event_emitter__(
-                {"type": "status", "data": {"description": description, "done": False}}
-            )
-
-        if token_budget is not None:
-            msg = f"Allocated up to {token_budget} tokens for this page."
-            logger.debug(msg)
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {"type": "status", "data": {"description": msg, "done": False}}
-                )
+        # (Removed redundant status messages – batch-level messages are sufficient)
 
         headers = {"Content-Type": "application/json"}
         payload = {
