@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.0.7
+version: 3.0.8
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -1580,6 +1580,9 @@ class Tools:
                                 "data": {"description": msg, "done": False},
                             }
                         )
+
+            logger.info(f"Finished background cache filter for {url}")
+
         except Exception as e:
             logger.error(f"Error in background cache filter for {url}: {e}")
             if __event_emitter__ and self.valves.MORE_STATUS:
@@ -1618,8 +1621,8 @@ class Tools:
                 system="Return only a JSON array of booleans. No other text.",
                 provider=provider,
                 temperature=0.0,
-                max_tokens=0,  # increased to avoid truncation/errors.
-                timeout=120,
+                max_tokens=4000,  # increased to avoid truncation
+                timeout=60,
             )
             import json, re
 
@@ -1737,7 +1740,7 @@ class Tools:
         """
         Consult cache, return (cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks).
         Emits status message and logs summary.
-        Now also skips URLs that are excluded by the LLM filter.
+        Now also skips URLs that are excluded by the LLM filter or domain filters.
         """
         cached_results = []
         uncached_urls = []
@@ -1746,6 +1749,9 @@ class Tools:
 
         if self.valves.USE_PAGE_CACHE:
             for url in gathered_urls:
+                # Skip excluded domains (valve filter)
+                if self._is_domain_excluded(url):
+                    continue
                 # Skip if the URL is excluded and still within TTL
                 if await self._is_url_excluded(url):
                     if self.valves.DEBUG:
@@ -1945,6 +1951,29 @@ class Tools:
 
     # region ── URL Validation Pipeline ────────────────────────────────────────
 
+    def _is_domain_excluded(self, url: str) -> bool:
+        """Check if the URL's domain is in the excluded domains or social media domains lists."""
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.lower()
+            # Remove 'www.' prefix for matching
+            if domain.startswith("www."):
+                domain = domain[4:]
+        except Exception:
+            return False
+
+        # Check general excluded domains
+        for excluded in self.valves.CRAWL4AI_EXCLUDE_DOMAINS.split(","):
+            excluded = excluded.strip().lower()
+            if excluded and (domain == excluded or domain.endswith("." + excluded)):
+                return True
+        # Check social media excluded domains
+        for excluded in self.valves.CRAWL4AI_EXCLUDE_SOCIAL_MEDIA_DOMAINS.split(","):
+            excluded = excluded.strip().lower()
+            if excluded and (domain == excluded or domain.endswith("." + excluded)):
+                return True
+        return False
+
     async def _deduplicate_wikipedia_urls(
         self,
         urls: List[str],
@@ -2034,6 +2063,15 @@ class Tools:
         call sequence in multiple places.
         """
         original_count = len(urls)
+
+        # Stage 0: Filter excluded domains
+        urls = [url for url in urls if not self._is_domain_excluded(url)]
+        if self.valves.DEBUG and original_count != len(urls):
+            logger.info(
+                f"Validation stage 0: filtered out "
+                f"{original_count - len(urls)} excluded domain URLs"
+            )
+            original_count = len(urls)
 
         # Stage 1: Filter invalid URLs
         urls = [url for url in urls if self._is_valid_crawl_url(url)]
@@ -2361,6 +2399,20 @@ Output ONLY a JSON array of strings. Example: ["fresadora", "fresa dental"]
 
         if self.valves.DEBUG:
             logger.info(f"Homonyms detected: {homonyms}")
+
+        # Emit homonyms found to the user
+        if homonyms:
+            homonyms_str = ", ".join(homonyms)
+            if __event_emitter__ and self.valves.MORE_STATUS:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": f"🔍 Homonyms detected: {homonyms_str}",
+                            "done": False,
+                        },
+                    }
+                )
 
         try:
             tokens_used = await self._estimate_llm_call_tokens(prompt, content)
@@ -3177,6 +3229,29 @@ Now evaluate these URLs:
         cached_results, uncached_urls, cache_hit_urls, cache_hit_chunks = (
             await self._handle_cache_and_split(gathered_urls, query, __event_emitter__)
         )
+
+        # Total URLs that will actually be used (cached + to-crawl)
+        total_processing = cache_hit_urls + len(uncached_urls)
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"────────────── CRAWLING STARTS ──────────────",
+                        "done": False,
+                    },
+                }
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"🔍 Processing {total_processing} most relevant results ({cache_hit_urls} from cache, {len(uncached_urls)} to crawl)...",
+                        "done": False,
+                    },
+                }
+            )
+
         if cached_results:
             async with self.stats_lock:
                 self.content_counter += len(cached_results)
@@ -3222,25 +3297,26 @@ Now evaluate these URLs:
                         if len(batch) > 3:
                             urls_str += f" and {len(batch)-3} more"
                         if __event_emitter__ and self.valves.MORE_STATUS:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": f"Processing Batch {batch_index+1} of {len(batch)} URL(s): {urls_str}",
-                                        "done": False,
-                                    },
-                                }
-                            )
                             if budget is not None:
                                 await __event_emitter__(
                                     {
                                         "type": "status",
                                         "data": {
-                                            "description": f"Allocated a budget up to {budget} tokens for batch {batch_index+1}",
+                                            "description": f"batch {batch_index+1}: Allocated a budget up to {budget} tokens.",
                                             "done": False,
                                         },
                                     }
                                 )
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Batch {batch_index+1}: Processing {len(batch)} URL(s): {urls_str}",
+                                        "done": False,
+                                    },
+                                }
+                            )
+
                         await asyncio.sleep(0.2)
                         return await self._crawl_url(
                             urls=batch,
@@ -3376,7 +3452,7 @@ Now evaluate these URLs:
             for batch_urls, batch_index in batches:
                 if batch_index in per_batch_tokens:
                     tokens_batch = per_batch_tokens[batch_index]
-                    msg = f"Batch {batch_index+1}: Extracted {tokens_batch} tokens"
+                    msg = f"Batch {batch_index+1} finished: Extracted {tokens_batch} tokens."
                     await __event_emitter__(
                         {"type": "status", "data": {"description": msg, "done": False}}
                     )
@@ -3531,14 +3607,14 @@ Now evaluate these URLs:
         __event_emitter__: Callable[[dict], Any],
         total_tokens: int = 0,
     ) -> None:
-        """Emits final status messages (crawled pages, elapsed time)."""
+        """Emits final status messages (inspected pages, elapsed time)."""
         if __event_emitter__:
             await __event_emitter__(
                 {
                     "type": "status",
                     "data": {
                         "description": f"────────────── FINISHED ──────────────",
-                        "done": True,
+                        "done": False,
                     },
                 }
             )
@@ -3551,12 +3627,12 @@ Now evaluate these URLs:
                     },
                 }
             )
-            if self.valves.MORE_STATUS:
+            if self.valves.MORE_STATUS and total_tokens > 0:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            "description": f"Extracted {total_tokens} tokens",
+                            "description": f"All batches finished: {total_tokens} tokens extracted in total",
                             "done": True,
                         },
                     }
@@ -3725,26 +3801,6 @@ Now evaluate these URLs:
                 )
 
         self.total_urls = len(gathered_urls)
-
-        if __event_emitter__ and self.valves.MORE_STATUS:
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"────────────── CRAWLING STARTS ──────────────",
-                        "done": False,
-                    },
-                }
-            )
-            await __event_emitter__(
-                {
-                    "type": "status",
-                    "data": {
-                        "description": f"🔍 Processing {len(gathered_urls)} most relevant results...",
-                        "done": False,
-                    },
-                }
-            )
 
         # 2. Execute crawl (normal or research)
         if effective_research_mode and gathered_urls:
