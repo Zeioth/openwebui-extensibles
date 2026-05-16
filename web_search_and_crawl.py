@@ -3614,6 +3614,15 @@ Now evaluate these URLs:
                 {
                     "type": "status",
                     "data": {
+                        "description": f"────────────── SEARCH STARTS ──────────────",
+                        "done": False,
+                    },
+                }
+            )
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
                         "description": f"🔍 Searching for '{query}'...",
                         "done": False,
                     },
@@ -3718,6 +3727,15 @@ Now evaluate these URLs:
         self.total_urls = len(gathered_urls)
 
         if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"────────────── CRAWLING STARTS ──────────────",
+                        "done": False,
+                    },
+                }
+            )
             await __event_emitter__(
                 {
                     "type": "status",
