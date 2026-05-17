@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.1.5
+version: 3.1.6
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -2606,19 +2606,18 @@ Output ONLY a JSON array of strings. Example for query "fresa": ["fresadora", "f
         if self.valves.DEBUG:
             logger.info(f"Homonyms detected: {homonyms}")
 
-        # Emit homonyms found to the user
-        if homonyms:
-            homonyms_str = ", ".join(homonyms)
-            if __event_emitter__ and self.valves.MORE_STATUS:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": f"🔍 Homonyms detected: {homonyms_str}",
-                            "done": False,
-                        },
-                    }
-                )
+        # Emit homonyms found (or none) to the user
+        homonyms_str = ", ".join(homonyms) if homonyms else "None"
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"🔍 Homonyms detected: {homonyms_str}",
+                        "done": False,
+                    },
+                }
+            )
 
         try:
             tokens_used = await self._estimate_llm_call_tokens(prompt, content)
