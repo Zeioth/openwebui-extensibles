@@ -4,7 +4,7 @@ description: Search and Crawls the web using SearXNG, OpenWebUI Native Search, a
 author: lexiismadd, zeioth
 author_url: https://github.com/lexiismadd, https://github.com/zeioth
 funding_url: https://github.com/open-webui
-version: 3.1.4
+version: 3.1.5
 license: MIT
 requirements: aiohttp, loguru, crawl4ai, orjson, tiktoken, sentence-transformers, chromadb
 """
@@ -1996,6 +1996,49 @@ class Tools:
 
     # endregion
 
+    # region ── Crawl Helpers ──────────────────────────────────────────────────
+
+    def _compute_token_budget(self, page_index: int, max_tokens: int) -> Optional[int]:
+        """Calcula el presupuesto de tokens para una página dada.
+        Retorna None si max_tokens <= 0 o el presupuesto está por debajo del mínimo.
+        """
+        if max_tokens <= 0:
+            return None
+        budget = int(
+            max_tokens / max(1, (page_index) ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA)
+        )
+        if budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET:
+            return None
+        return budget
+
+    async def _emit_skip_budget_status(self, url: str, budget: int, __event_emitter__):
+        """Emite un mensaje de estado cuando se omite una URL por presupuesto insuficiente."""
+        if __event_emitter__ and self.valves.MORE_STATUS:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": f"⏭️ Skipping URL {url}: token budget {budget} below minimum {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}.",
+                        "done": False,
+                    },
+                }
+            )
+
+    async def _validate_and_mark_crawled(
+        self, url: str, crawled_set: set, query: str, __event_emitter__
+    ) -> bool:
+        """Valida la URL con el pipeline y, si es válida, la añade al conjunto de ya rastreadas.
+        Retorna True si la URL fue validada y marcada."""
+        validated = await self._validate_url_pipeline(
+            [url], query, check_keywords=False, __event_emitter__=__event_emitter__
+        )
+        if not validated:
+            return False
+        crawled_set.add(url)
+        return True
+
+    # endregion
+
     # region ── Semantic Filter (snippet level) ────────────────────────────────
 
     async def _semantic_filter_urls(
@@ -3361,33 +3404,24 @@ Now evaluate these URLs:
                 batch_index = len(batches)
                 batches.append((batch, batch_index))
 
-                budget = None
-                if max_tokens > 0:
-                    budget = int(
-                        max_tokens
-                        / max(
-                            1,
-                            (self.pages_crawled + batch_index + 1)
-                            ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
-                        )
-                    )
+                # Usar el nuevo helper para calcular el presupuesto
+                budget = self._compute_token_budget(
+                    self.pages_crawled + batch_index + 1, max_tokens
+                )
 
-                if (
-                    budget is not None
-                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
-                ):
+                if budget is None:
                     if __event_emitter__ and self.valves.MORE_STATUS:
                         await __event_emitter__(
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"⏭️ Skipping batch {batch_index+1}: token budget {budget} below minimum {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}.",
+                                    "description": f"⏭️ Skipping batch {batch_index+1}: token budget below minimum.",
                                     "done": False,
                                 },
                             }
                         )
                     logger.debug(
-                        f"Skipping batch {batch_index}: token budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
+                        f"Skipping batch {batch_index}: token budget below minimum"
                     )
                     continue
 
@@ -4636,47 +4670,17 @@ Now evaluate these URLs:
                 if url in crawled_pages:
                     continue
 
-                # Token budget for individual URL (used for validation before crawling)
-                budget = None
-                if max_tokens > 0:
-                    budget = int(
-                        max_tokens
-                        / max(
-                            1,
-                            (len(crawled_pages) + 1)
-                            ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
-                        )
-                    )
+                budget = self._compute_token_budget(len(crawled_pages) + 1, max_tokens)
 
-                if (
-                    budget is not None
-                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+                if budget is None:
+                    await self._emit_skip_budget_status(url, 0, __event_emitter__)
+                    continue
+
+                if not await self._validate_and_mark_crawled(
+                    url, crawled_pages, query, __event_emitter__
                 ):
-                    if __event_emitter__ and self.valves.MORE_STATUS:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"⏭️ Skipping URL {url}: token budget {budget} below minimum {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    logger.debug(
-                        f"Skipping URL {url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
-                    )
                     continue
 
-                validated = await self._validate_url_pipeline(
-                    [url],
-                    query,
-                    check_keywords=False,
-                    __event_emitter__=__event_emitter__,
-                )
-                if not validated:
-                    continue
-
-                crawled_pages.add(url)
                 urls_to_crawl.append(url)
                 url_depths.append(depth)
 
@@ -4774,44 +4778,15 @@ Now evaluate these URLs:
             if current_url in crawled_pages:
                 continue
 
-            # Token budget for this URL
-            budget = None
-            if max_tokens > 0:
-                budget = int(
-                    max_tokens
-                    / max(
-                        1,
-                        (len(crawled_pages) + 1)
-                        ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
-                    )
-                )
+            budget = self._compute_token_budget(len(crawled_pages) + 1, max_tokens)
 
-            if (
-                budget is not None
-                and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
-            ):
-                if __event_emitter__ and self.valves.MORE_STATUS:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"⏭️ Skipping URL {current_url}: token budget {budget} below minimum {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}.",
-                                "done": False,
-                            },
-                        }
-                    )
-                logger.debug(
-                    f"Skipping URL {current_url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
-                )
+            if budget is None:
+                await self._emit_skip_budget_status(current_url, 0, __event_emitter__)
                 continue
 
-            validated = await self._validate_url_pipeline(
-                [current_url],
-                query,
-                check_keywords=False,
-                __event_emitter__=__event_emitter__,
-            )
-            if not validated:
+            if not await self._validate_and_mark_crawled(
+                current_url, crawled_pages, query, __event_emitter__
+            ):
                 continue
 
             if __event_emitter__ and self.valves.MORE_STATUS:
@@ -4824,8 +4799,6 @@ Now evaluate these URLs:
                         },
                     }
                 )
-
-            crawled_pages.add(current_url)
 
             remaining = len(urls_to_process)
 
@@ -4969,46 +4942,17 @@ Now evaluate these URLs:
                 ):
                     continue
 
-                budget = None
-                if max_tokens > 0:
-                    budget = int(
-                        max_tokens
-                        / max(
-                            1,
-                            (len(crawled_pages) + 1)
-                            ** self.valves.CRAWL4AI_TOKEN_DECAY_ALPHA,
-                        )
-                    )
+                budget = self._compute_token_budget(len(crawled_pages) + 1, max_tokens)
 
-                if (
-                    budget is not None
-                    and budget < self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET
+                if budget is None:
+                    await self._emit_skip_budget_status(url, 0, __event_emitter__)
+                    continue
+
+                if not await self._validate_and_mark_crawled(
+                    url, crawled_pages, query, __event_emitter__
                 ):
-                    if __event_emitter__ and self.valves.MORE_STATUS:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"⏭️ Skipping URL {url}: token budget {budget} below minimum {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}.",
-                                    "done": False,
-                                },
-                            }
-                        )
-                    logger.debug(
-                        f"Skipping URL {url}: budget {budget} < {self.valves.CRAWL4AI_MIN_PAGE_TOKEN_BUDGET}"
-                    )
                     continue
 
-                validated = await self._validate_url_pipeline(
-                    [url],
-                    query,
-                    check_keywords=False,
-                    __event_emitter__=__event_emitter__,
-                )
-                if not validated:
-                    continue
-
-                crawled_pages.add(url)
                 urls_to_crawl.append(url)
                 url_depths.append(depth)
 
